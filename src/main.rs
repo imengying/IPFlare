@@ -14,10 +14,10 @@ use crate::pp::PP;
 use rand::RngExt;
 use reqwest::Client;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -102,7 +102,7 @@ async fn main() {
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal as unix_signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal as unix_signal};
 
         match unix_signal(SignalKind::terminate()) {
             Ok(mut terminate) => {

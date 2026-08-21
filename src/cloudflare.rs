@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::time::Duration;
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 
 // --- Ttl ---
 
@@ -15,11 +15,7 @@ impl Ttl {
     pub const AUTO: Ttl = Ttl(1);
 
     pub fn new(value: i64) -> Self {
-        if value < 30 {
-            Ttl::AUTO
-        } else {
-            Ttl(value)
-        }
+        if value < 30 { Ttl::AUTO } else { Ttl(value) }
     }
 
     pub fn value(&self) -> i64 {
@@ -885,8 +881,8 @@ mod tests {
     use crate::pp::PP;
     use std::net::IpAddr;
     use wiremock::{
-        matchers::{method, path, query_param, query_param_is_missing},
         Mock, MockServer, ResponseTemplate,
+        matchers::{method, path, query_param, query_param_is_missing},
     };
 
     fn pp() -> PP {

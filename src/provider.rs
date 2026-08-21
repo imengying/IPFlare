@@ -1,6 +1,6 @@
 use crate::pp::{self, PP};
-use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::Client;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
@@ -387,7 +387,7 @@ fn build_dns_query(name: &[u8], qtype: u16, qclass: u16) -> Vec<u8> {
     buf.extend_from_slice(&[0x00, 0x00]); // Answer RRs: 0
     buf.extend_from_slice(&[0x00, 0x00]); // Authority RRs: 0
     buf.extend_from_slice(&[0x00, 0x00]); // Additional RRs: 0
-                                          // Question section
+    // Question section
     buf.extend_from_slice(name);
     buf.extend_from_slice(&qtype.to_be_bytes());
     buf.extend_from_slice(&qclass.to_be_bytes());
@@ -931,11 +931,11 @@ mod tests {
         data.extend_from_slice(&[0x00, 0x01]); // ANCOUNT=1
         data.extend_from_slice(&[0x00, 0x00]); // NSCOUNT=0
         data.extend_from_slice(&[0x00, 0x00]); // ARCOUNT=0
-                                               // Question section: name = \x04test\x00
+        // Question section: name = \x04test\x00
         data.extend_from_slice(b"\x04test\x00");
         data.extend_from_slice(&[0x00, 0x10]); // QTYPE=TXT
         data.extend_from_slice(&[0x00, 0x01]); // QCLASS=IN
-                                               // Answer section: name pointer to offset 12
+        // Answer section: name pointer to offset 12
         data.extend_from_slice(&[0xC0, 0x0C]); // pointer to question name
         data.extend_from_slice(&[0x00, 0x10]); // TYPE=TXT
         data.extend_from_slice(&[0x00, 0x01]); // CLASS=IN
@@ -1040,8 +1040,8 @@ mod tests {
 
     use crate::pp::PP;
     use wiremock::{
-        matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
     };
 
     #[tokio::test]
