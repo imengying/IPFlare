@@ -34,14 +34,6 @@ WAF IP 列表。
 curl -fsSL https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | sudo sh
 ```
 
-没有 `curl` 时可使用 `wget`：
-
-```sh
-wget -qO- https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | sudo sh
-```
-
-当前已是 root 时去掉 `sudo`。
-
 必要配置只会询问：
 
 - Cloudflare API Token
@@ -76,9 +68,7 @@ cargo build --release --locked
 
 ## 配置
 
-程序只读取当前工作目录中的 `config.json`。不支持环境变量配置或旧版配置
-格式，未知字段会直接报错。
-
+程序只读取当前工作目录中的 `config.json`。
 可以从仓库示例开始：
 
 ```bash
@@ -197,9 +187,6 @@ DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。Token
 ```bash
 ./ipflare --dry-run
 ```
-
-程序本体不支持其他命令行参数。启动、停止、重启和状态查询由
-systemd 或 OpenRC 管理。
 
 ## systemd
 
