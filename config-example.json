@@ -1,0 +1,30 @@
+{
+  "api_token": "your-cloudflare-api-token",
+  "account_id": "11111111111111111111111111111111",
+  "zone_id": "22222222222222222222222222222222",
+  "domains": [
+    "example.com",
+    "www.example.com"
+  ],
+  "ipv4_domains": [],
+  "ipv6_domains": [],
+  "ipv4_provider": "cloudflare.trace",
+  "ipv6_provider": "none",
+  "waf_lists": [],
+  "schedule": "@every 5m",
+  "update_on_start": true,
+  "delete_on_stop": false,
+  "delete_on_failure": false,
+  "ttl": 1,
+  "proxied": "false",
+  "record_comment": "ipflare",
+  "managed_records_comment_regex": null,
+  "waf_list_item_comment": null,
+  "managed_waf_list_items_comment_regex": null,
+  "detection_timeout": "5s",
+  "update_timeout": "30s",
+  "reject_cloudflare_ips": true,
+  "emoji": true,
+  "quiet": false,
+  "telegram": null
+}

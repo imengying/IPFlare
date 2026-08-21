@@ -1,0 +1,142 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify tag and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v6
+
+      - name: Validate tag version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$tag_version" != "$cargo_version" ]]; then
+            echo "Tag version $tag_version does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: cargo test --locked
+
+  build:
+    name: Build ${{ matrix.archive_name }}
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            archive_name: linux-x86_64
+            extension: tar.gz
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive_name: linux-aarch64
+            extension: tar.gz
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            archive_name: macos-x86_64
+            extension: tar.gz
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            archive_name: macos-aarch64
+            extension: tar.gz
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive_name: windows-x86_64
+            extension: zip
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v6
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build release binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          package="ipflare-${GITHUB_REF_NAME}-${{ matrix.archive_name }}"
+          tar -C "target/${{ matrix.target }}/release" -czf "$package.tar.gz" ipflare
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = "ipflare-${env:GITHUB_REF_NAME}-${{ matrix.archive_name }}"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/ipflare.exe" -DestinationPath "$package.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ipflare-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.extension }}
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Generate checksums and release notes
+        shell: bash
+        run: |
+          cd dist
+          sha256sum ipflare-* > SHA256SUMS
+          cd ..
+          previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null || true)"
+          if [[ -n "$previous_tag" ]]; then
+            git log --reverse --format='- %s (`%h`)' "$previous_tag..$GITHUB_SHA" > RELEASE_NOTES.md
+          else
+            git log -1 --format='- %s (`%h`)' "$GITHUB_SHA" > RELEASE_NOTES.md
+          fi
+          test -s RELEASE_NOTES.md
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          body_path: RELEASE_NOTES.md
+          files: dist/*
+          fail_on_unmatched_files: true

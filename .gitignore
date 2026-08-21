@@ -1,0 +1,10 @@
+# Local configuration contains the Cloudflare API token
+/config.json
+
+# Rust build artifacts
+/target/
+debug/
+*.pdb
+
+# Git History
+**/.history/*

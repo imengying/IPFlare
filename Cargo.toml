@@ -1,0 +1,28 @@
+[package]
+name = "ipflare"
+version = "2.2.0"
+edition = "2021"
+description = "Update Cloudflare DNS records and WAF lists from a dynamic IP address"
+license = "GPL-3.0"
+repository = "https://github.com/imengying/IPFlare"
+
+[dependencies]
+reqwest = { version = "0.13.4", features = ["json", "rustls-no-provider"], default-features = false }
+rustls = { version = "0.23.43", features = ["ring"], default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "signal", "net"] }
+regex-lite = "0.1.9"
+if-addrs = "0.15.0"
+rand = "0.10.2"
+idna = "1.1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+wiremock = "0.6.5"
