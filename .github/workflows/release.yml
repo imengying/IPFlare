@@ -10,21 +10,34 @@ permissions:
 
 jobs:
   verify:
-    name: Verify tag and tests
+    name: Apply tag version and test
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@v7
 
-      - name: Validate tag version
+      - name: Apply tag version
         shell: bash
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          if [[ "$tag_version" != "$cargo_version" ]]; then
-            echo "Tag version $tag_version does not match Cargo.toml version $cargo_version" >&2
+          release_version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != v* || -z "$release_version" ]]; then
+            echo "Release tag must use the form v<version>" >&2
             exit 1
           fi
+          sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${release_version}\"/" Cargo.toml
+          awk -v version="${release_version}" '
+            $0 == "[[package]]" { package = 1; ipflare = 0 }
+            package && $0 == "name = \"ipflare\"" { ipflare = 1 }
+            ipflare && $0 ~ /^version = "/ {
+              print "version = \"" version "\""
+              ipflare = 0
+              next
+            }
+            { print }
+          ' Cargo.lock > Cargo.lock.new
+          mv Cargo.lock.new Cargo.lock
+          rm Cargo.toml.bak
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
       - name: Run tests
         run: cargo test --locked
@@ -61,6 +74,29 @@ jobs:
     steps:
       - name: Checkout tagged commit
         uses: actions/checkout@v7
+
+      - name: Apply tag version
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          if [[ "$GITHUB_REF_NAME" != v* || -z "$release_version" ]]; then
+            echo "Release tag must use the form v<version>" >&2
+            exit 1
+          fi
+          sed -i.bak -E "s/^version = \"[^\"]+\"/version = \"${release_version}\"/" Cargo.toml
+          awk -v version="${release_version}" '
+            $0 == "[[package]]" { package = 1; ipflare = 0 }
+            package && $0 == "name = \"ipflare\"" { ipflare = 1 }
+            ipflare && $0 ~ /^version = "/ {
+              print "version = \"" version "\""
+              ipflare = 0
+              next
+            }
+            { print }
+          ' Cargo.lock > Cargo.lock.new
+          mv Cargo.lock.new Cargo.lock
+          rm Cargo.toml.bak
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
