@@ -1,4 +1,4 @@
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -80,10 +80,56 @@ impl WAFList {
 
 // --- API Response Types ---
 
+/// A single entry of Cloudflare's `errors` array. The API returns HTTP 200 with
+/// `success: false` for application-level failures, so this is the only place
+/// the actual reason appears.
+#[derive(Debug, Deserialize, Default)]
+pub struct CfError {
+    pub code: Option<i64>,
+    pub message: Option<String>,
+}
+
+/// Render an `errors` array as a single human-readable line.
+fn describe_errors(errors: &[CfError]) -> String {
+    if errors.is_empty() {
+        return "no error details returned".to_string();
+    }
+    errors
+        .iter()
+        .map(|error| {
+            let message = error.message.as_deref().unwrap_or("unknown error");
+            match error.code {
+                Some(code) => format!("{message} (code {code})"),
+                None => message.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Shared behaviour of Cloudflare's response envelopes, so a `success: false`
+/// body is reported the same way regardless of which endpoint returned it.
+pub trait CfEnvelope {
+    fn is_failure(&self) -> bool;
+    fn error_summary(&self) -> String;
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CfResponse<T> {
     pub result: Option<T>,
     pub success: Option<bool>,
+    #[serde(default)]
+    pub errors: Vec<CfError>,
+}
+
+impl<T> CfEnvelope for CfResponse<T> {
+    fn is_failure(&self) -> bool {
+        self.success == Some(false)
+    }
+
+    fn error_summary(&self) -> String {
+        describe_errors(&self.errors)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,6 +137,18 @@ pub struct CfListResponse<T> {
     pub result: Option<Vec<T>>,
     pub success: Option<bool>,
     pub result_info: Option<ResultInfo>,
+    #[serde(default)]
+    pub errors: Vec<CfError>,
+}
+
+impl<T> CfEnvelope for CfListResponse<T> {
+    fn is_failure(&self) -> bool {
+        self.success == Some(false)
+    }
+
+    fn error_summary(&self) -> String {
+        describe_errors(&self.errors)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,7 +271,7 @@ impl CloudflareHandle {
         format!("{}/{path}", self.base_url)
     }
 
-    async fn api_request<T: serde::de::DeserializeOwned>(
+    async fn api_request<T: serde::de::DeserializeOwned + CfEnvelope>(
         &self,
         method: reqwest::Method,
         path: &str,
@@ -224,7 +282,7 @@ impl CloudflareHandle {
         self.api_request_url(method, url, body, ppfmt).await
     }
 
-    async fn api_request_url<T: serde::de::DeserializeOwned>(
+    async fn api_request_url<T: serde::de::DeserializeOwned + CfEnvelope>(
         &self,
         method: reqwest::Method,
         url: reqwest::Url,
@@ -241,27 +299,49 @@ impl CloudflareHandle {
             Ok(resp) => {
                 if resp.status().is_success() {
                     match resp.json::<T>().await {
-                        Ok(value) => Some(value),
+                        Ok(value) => {
+                            // Cloudflare signals application-level failures with
+                            // HTTP 200 and success: false; the reason is only in
+                            // the errors array.
+                            if value.is_failure() {
+                                ppfmt.errorf(&format!(
+                                    "API {method} '{url}' failed: {}",
+                                    value.error_summary()
+                                ));
+                            }
+                            Some(value)
+                        }
                         Err(error) => {
-                            ppfmt.errorf(
-                                pp::EMOJI_ERROR,
-                                &format!("API {method} '{url}' returned invalid JSON: {error}"),
-                            );
+                            ppfmt.errorf(&format!(
+                                "API {method} '{url}' returned invalid JSON: {error}"
+                            ));
                             None
                         }
                     }
                 } else {
                     let url_str = resp.url().to_string();
+                    let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
-                    ppfmt.errorf(
-                        pp::EMOJI_ERROR,
-                        &format!("API {method} '{url_str}' failed: {text}"),
-                    );
+                    // 4xx/5xx bodies carry the same errors array; prefer it over
+                    // the raw JSON, which is unreadable in a log line.
+                    let detail = serde_json::from_str::<CfResponse<serde_json::Value>>(&text)
+                        .map(|response| describe_errors(&response.errors))
+                        .unwrap_or_else(|_| {
+                            let text = text.trim();
+                            if text.is_empty() {
+                                "empty response body".to_string()
+                            } else {
+                                text.to_string()
+                            }
+                        });
+                    ppfmt.errorf(&format!(
+                        "API {method} '{url_str}' failed: HTTP {status}: {detail}"
+                    ));
                     None
                 }
             }
             Err(e) => {
-                ppfmt.errorf(pp::EMOJI_ERROR, &format!("API {method} '{url}' error: {e}"));
+                ppfmt.errorf(&format!("API {method} '{url}' error: {e}"));
                 None
             }
         }
@@ -427,15 +507,12 @@ impl CloudflareHandle {
             let mut success = true;
             for record in &managed {
                 if dry_run {
-                    ppfmt.noticef(
-                        pp::EMOJI_DELETE,
-                        &format!("[DRY RUN] Would delete record {fqdn} ({})", record.content),
-                    );
+                    ppfmt.noticef(&format!(
+                        "[DRY RUN] Would delete record {fqdn} ({})",
+                        record.content
+                    ));
                 } else {
-                    ppfmt.noticef(
-                        pp::EMOJI_DELETE,
-                        &format!("Deleting record {fqdn} ({})", record.content),
-                    );
+                    ppfmt.noticef(&format!("Deleting record {fqdn} ({})", record.content));
                     success &= self.delete_record(zone_id, &record.id, ppfmt).await;
                 }
             }
@@ -477,15 +554,9 @@ impl CloudflareHandle {
                         comment: comment.map(|s| s.to_string()),
                     };
                     if dry_run {
-                        ppfmt.noticef(
-                            pp::EMOJI_UPDATE,
-                            &format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
                     } else {
-                        ppfmt.noticef(
-                            pp::EMOJI_UPDATE,
-                            &format!("Updating record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!("Updating record {fqdn} -> {ip_str}"));
                         success &= self
                             .update_record(zone_id, &record.id, &payload, ppfmt)
                             .await
@@ -511,15 +582,9 @@ impl CloudflareHandle {
                     used_record_ids.push(&record.id);
                     any_change = true;
                     if dry_run {
-                        ppfmt.noticef(
-                            pp::EMOJI_UPDATE,
-                            &format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
                     } else {
-                        ppfmt.noticef(
-                            pp::EMOJI_UPDATE,
-                            &format!("Updating record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!("Updating record {fqdn} -> {ip_str}"));
                         success &= self
                             .update_record(zone_id, &record.id, &payload, ppfmt)
                             .await
@@ -528,15 +593,11 @@ impl CloudflareHandle {
                 } else {
                     any_change = true;
                     if dry_run {
-                        ppfmt.noticef(
-                            pp::EMOJI_CREATE,
-                            &format!("[DRY RUN] Would add new record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!(
+                            "[DRY RUN] Would add new record {fqdn} -> {ip_str}"
+                        ));
                     } else {
-                        ppfmt.noticef(
-                            pp::EMOJI_CREATE,
-                            &format!("Adding new record {fqdn} -> {ip_str}"),
-                        );
+                        ppfmt.noticef(&format!("Adding new record {fqdn} -> {ip_str}"));
                         success &= self.create_record(zone_id, &payload, ppfmt).await.is_some();
                     }
                 }
@@ -548,18 +609,15 @@ impl CloudflareHandle {
             if !used_record_ids.contains(&&record.id) {
                 any_change = true;
                 if dry_run {
-                    ppfmt.noticef(
-                        pp::EMOJI_DELETE,
-                        &format!(
-                            "[DRY RUN] Would delete stale record {} ({})",
-                            fqdn, record.content
-                        ),
-                    );
+                    ppfmt.noticef(&format!(
+                        "[DRY RUN] Would delete stale record {} ({})",
+                        fqdn, record.content
+                    ));
                 } else if success {
-                    ppfmt.noticef(
-                        pp::EMOJI_DELETE,
-                        &format!("Deleting stale record {} ({})", fqdn, record.content),
-                    );
+                    ppfmt.noticef(&format!(
+                        "Deleting stale record {} ({})",
+                        fqdn, record.content
+                    ));
                     success &= self.delete_record(zone_id, &record.id, ppfmt).await;
                 }
             }
@@ -591,10 +649,7 @@ impl CloudflareHandle {
         let mut success = true;
         for record in &existing {
             if self.is_managed_record(record) {
-                ppfmt.noticef(
-                    pp::EMOJI_DELETE,
-                    &format!("Deleting record {fqdn} ({})", record.content),
-                );
+                ppfmt.noticef(&format!("Deleting record {fqdn} ({})", record.content));
                 success &= self.delete_record(zone_id, &record.id, ppfmt).await;
             }
         }
@@ -652,10 +707,7 @@ impl CloudflareHandle {
                 return Some(items);
             };
             if !seen_cursors.insert(next.clone()) {
-                ppfmt.errorf(
-                    pp::EMOJI_ERROR,
-                    "WAF list pagination returned a repeated cursor",
-                );
+                ppfmt.errorf("WAF list pagination returned a repeated cursor");
                 return None;
             }
             cursor = Some(next);
@@ -704,30 +756,23 @@ impl CloudflareHandle {
             match status.status.as_str() {
                 "completed" => return true,
                 "failed" => {
-                    ppfmt.errorf(
-                        pp::EMOJI_ERROR,
-                        &format!(
-                            "WAF list operation {operation_id} failed: {}",
-                            status.error.as_deref().unwrap_or("unknown error")
-                        ),
-                    );
+                    ppfmt.errorf(&format!(
+                        "WAF list operation {operation_id} failed: {}",
+                        status.error.as_deref().unwrap_or("unknown error")
+                    ));
                     return false;
                 }
                 "pending" | "running" if Instant::now() < deadline => {
                     sleep(Duration::from_millis(250)).await;
                 }
                 "pending" | "running" => {
-                    ppfmt.errorf(
-                        pp::EMOJI_ERROR,
-                        &format!("WAF list operation {operation_id} timed out"),
-                    );
+                    ppfmt.errorf(&format!("WAF list operation {operation_id} timed out"));
                     return false;
                 }
                 other => {
-                    ppfmt.errorf(
-                        pp::EMOJI_ERROR,
-                        &format!("WAF list operation {operation_id} returned status '{other}'"),
-                    );
+                    ppfmt.errorf(&format!(
+                        "WAF list operation {operation_id} returned status '{other}'"
+                    ));
                     return false;
                 }
             }
@@ -746,10 +791,7 @@ impl CloudflareHandle {
         let list_meta = match self.find_waf_list(waf_list, ppfmt).await {
             Some(meta) => meta,
             None => {
-                ppfmt.errorf(
-                    pp::EMOJI_ERROR,
-                    &format!("WAF list {} not found", waf_list.describe()),
-                );
+                ppfmt.errorf(&format!("WAF list {} not found", waf_list.describe()));
                 return SetResult::Failed;
             }
         };
@@ -794,39 +836,35 @@ impl CloudflareHandle {
 
         if dry_run {
             for ip in &to_add {
-                ppfmt.noticef(
-                    pp::EMOJI_CREATE,
-                    &format!(
-                        "[DRY RUN] Would add {} to WAF list {}",
-                        ip,
-                        waf_list.describe()
-                    ),
-                );
+                ppfmt.noticef(&format!(
+                    "[DRY RUN] Would add {} to WAF list {}",
+                    ip,
+                    waf_list.describe()
+                ));
             }
             for ip in &ips_to_remove {
-                ppfmt.noticef(
-                    pp::EMOJI_DELETE,
-                    &format!(
-                        "[DRY RUN] Would remove {} from WAF list {}",
-                        ip,
-                        waf_list.describe()
-                    ),
-                );
+                ppfmt.noticef(&format!(
+                    "[DRY RUN] Would remove {} from WAF list {}",
+                    ip,
+                    waf_list.describe()
+                ));
             }
             return SetResult::Updated;
         }
 
         for ip in &ips_to_remove {
-            ppfmt.noticef(
-                pp::EMOJI_DELETE,
-                &format!("Removing {} from WAF list {}", ip, waf_list.describe()),
-            );
+            ppfmt.noticef(&format!(
+                "Removing {} from WAF list {}",
+                ip,
+                waf_list.describe()
+            ));
         }
         for ip in &to_add {
-            ppfmt.noticef(
-                pp::EMOJI_CREATE,
-                &format!("Adding {} to WAF list {}", ip, waf_list.describe()),
-            );
+            ppfmt.noticef(&format!(
+                "Adding {} to WAF list {}",
+                ip,
+                waf_list.describe()
+            ));
         }
 
         let mut target = BTreeMap::new();
@@ -835,10 +873,8 @@ impl CloudflareHandle {
                 Some(regex) => regex.is_match(item.comment.as_deref().unwrap_or("")),
                 None => true,
             };
-            if !managed {
-                if let Some(ip) = &item.ip {
-                    target.insert(ip.clone(), item.comment.clone());
-                }
+            if !managed && let Some(ip) = &item.ip {
+                target.insert(ip.clone(), item.comment.clone());
             }
         }
         for ip in &desired_ips {
@@ -886,11 +922,125 @@ mod tests {
     };
 
     fn pp() -> PP {
-        PP::new(false, false)
+        PP::new(false)
+    }
+
+    /// The managed-comment regex decides which existing records ipflare may
+    /// touch. A missing comment must never count as managed, or an unrelated
+    /// record would be overwritten.
+    #[test]
+    fn managed_record_regex_selects_by_comment() {
+        fn record(comment: Option<&str>) -> DnsRecord {
+            DnsRecord {
+                id: "r1".to_string(),
+                name: "test".to_string(),
+                content: "1.2.3.4".to_string(),
+                proxied: None,
+                ttl: None,
+                comment: comment.map(str::to_string),
+            }
+        }
+
+        // No regex: every record is managed.
+        let all = CloudflareHandle::with_base_url("http://unused", test_auth());
+        assert!(all.is_managed_record(&record(None)));
+        assert!(all.is_managed_record(&record(Some("anything"))));
+
+        let filtered = handle_with_regex("http://unused", "^managed-by-ipflare$");
+        assert!(filtered.is_managed_record(&record(Some("managed-by-ipflare"))));
+        assert!(!filtered.is_managed_record(&record(Some("something-else"))));
+        assert!(!filtered.is_managed_record(&record(None)));
+    }
+
+    /// A non-2xx response yields None for every verb, so a failed request is
+    /// never mistaken for an empty result.
+    #[tokio::test]
+    async fn api_request_returns_none_on_http_error() {
+        for (verb, status) in [
+            (reqwest::Method::GET, 500),
+            (reqwest::Method::POST, 403),
+            (reqwest::Method::PUT, 400),
+            (reqwest::Method::DELETE, 404),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method(verb.as_str()))
+                .respond_with(ResponseTemplate::new(status).set_body_string("failure"))
+                .mount(&server)
+                .await;
+
+            let cf = handle(&server.uri());
+            let body = serde_json::json!({ "test": true });
+            let result: Option<CfResponse<serde_json::Value>> = cf
+                .api_request(verb.clone(), "endpoint", Some(&body), &PP::new(true))
+                .await;
+            assert!(result.is_none(), "{verb} {status} should yield None");
+        }
+    }
+
+    /// Cloudflare rejects TTLs below 30 other than the magic value 1, so any
+    /// configured value under 30 (including negatives) collapses to auto.
+    #[test]
+    fn ttl_below_30_becomes_auto() {
+        for value in [-5, 0, 1, 29] {
+            assert_eq!(Ttl::new(value), Ttl::AUTO, "ttl {value} should be auto");
+        }
+        for value in [30, 120, 86400] {
+            assert_eq!(Ttl::new(value), Ttl(value), "ttl {value} should be kept");
+        }
+        assert_eq!(Ttl::AUTO.describe(), "auto");
+        assert_eq!(Ttl(120).describe(), "120s");
     }
 
     fn test_auth() -> Auth {
         Auth::Token("test-token".to_string())
+    }
+
+    /// Cloudflare's errors array is the only place the reason for a
+    /// `success: false` response appears, so it must survive into the log line.
+    #[test]
+    fn describes_error_array() {
+        let errors = vec![
+            CfError {
+                code: Some(81044),
+                message: Some("Record does not exist".to_string()),
+            },
+            CfError {
+                code: None,
+                message: Some("Bad request".to_string()),
+            },
+        ];
+        assert_eq!(
+            describe_errors(&errors),
+            "Record does not exist (code 81044); Bad request"
+        );
+    }
+
+    #[test]
+    fn describes_empty_error_array() {
+        assert_eq!(describe_errors(&[]), "no error details returned");
+        assert_eq!(
+            describe_errors(&[CfError::default()]),
+            "unknown error".to_string()
+        );
+    }
+
+    /// A 200 response carrying `success: false` must be reported as a failure and
+    /// must not be mistaken for a successful empty result.
+    #[tokio::test]
+    async fn reports_success_false_with_error_details() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/zones/zone-1/dns_records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": false,
+                "result": null,
+                "errors": [{ "code": 9109, "message": "Invalid access token" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let cf = handle(&server.uri());
+        assert!(cf.list_records("zone-1", "A", &pp()).await.is_none());
     }
 
     fn handle(base_url: &str) -> CloudflareHandle {
@@ -943,48 +1093,9 @@ mod tests {
     // Ttl tests
     // -------------------------------------------------------
 
-    #[test]
-    fn ttl_new_below_30_becomes_auto() {
-        assert_eq!(Ttl::new(0), Ttl::AUTO);
-        assert_eq!(Ttl::new(1), Ttl::AUTO);
-        assert_eq!(Ttl::new(29), Ttl::AUTO);
-        assert_eq!(Ttl::new(-5), Ttl::AUTO);
-    }
-
-    #[test]
-    fn ttl_new_at_or_above_30_stays() {
-        assert_eq!(Ttl::new(30), Ttl(30));
-        assert_eq!(Ttl::new(120), Ttl(120));
-        assert_eq!(Ttl::new(86400), Ttl(86400));
-    }
-
-    #[test]
-    fn ttl_auto_constant() {
-        assert_eq!(Ttl::AUTO, Ttl(1));
-    }
-
-    #[test]
-    fn ttl_describe_auto() {
-        assert_eq!(Ttl::AUTO.describe(), "auto");
-        assert_eq!(Ttl(1).describe(), "auto");
-    }
-
-    #[test]
-    fn ttl_describe_seconds() {
-        assert_eq!(Ttl(120).describe(), "120s");
-        assert_eq!(Ttl(3600).describe(), "3600s");
-    }
-
     // -------------------------------------------------------
     // Auth tests
     // -------------------------------------------------------
-
-    #[test]
-    fn auth_token_variant() {
-        let auth = Auth::Token("my-token".to_string());
-        let Auth::Token(token) = &auth;
-        assert_eq!(token, "my-token");
-    }
 
     // -------------------------------------------------------
     // WAFList tests
@@ -1003,15 +1114,6 @@ mod tests {
         assert!(WAFList::new("acc", "My-List").is_err());
         assert!(WAFList::new("acc", "UPPER").is_err());
         assert!(WAFList::new("acc", "has space").is_err());
-    }
-
-    #[test]
-    fn waf_list_describe() {
-        let wl = WAFList {
-            account_id: "acct".to_string(),
-            list_name: "blocklist".to_string(),
-        };
-        assert_eq!(wl.describe(), "acct/blocklist");
     }
 
     // -------------------------------------------------------
@@ -1457,62 +1559,6 @@ mod tests {
 
     // --- is_managed_record ---
 
-    #[test]
-    fn is_managed_record_no_regex_manages_all() {
-        let h = CloudflareHandle::with_base_url("http://unused", test_auth());
-        let record = DnsRecord {
-            id: "r1".to_string(),
-            name: "test".to_string(),
-            content: "1.2.3.4".to_string(),
-            proxied: None,
-            ttl: None,
-            comment: None,
-        };
-        assert!(h.is_managed_record(&record));
-    }
-
-    #[test]
-    fn is_managed_record_with_regex_matching() {
-        let h = handle_with_regex("http://unused", "^managed-by-ipflare$");
-        let record = DnsRecord {
-            id: "r1".to_string(),
-            name: "test".to_string(),
-            content: "1.2.3.4".to_string(),
-            proxied: None,
-            ttl: None,
-            comment: Some("managed-by-ipflare".to_string()),
-        };
-        assert!(h.is_managed_record(&record));
-    }
-
-    #[test]
-    fn is_managed_record_with_regex_not_matching() {
-        let h = handle_with_regex("http://unused", "^managed-by-ipflare$");
-        let record = DnsRecord {
-            id: "r1".to_string(),
-            name: "test".to_string(),
-            content: "1.2.3.4".to_string(),
-            proxied: None,
-            ttl: None,
-            comment: Some("something-else".to_string()),
-        };
-        assert!(!h.is_managed_record(&record));
-    }
-
-    #[test]
-    fn is_managed_record_with_regex_no_comment() {
-        let h = handle_with_regex("http://unused", "^managed-by-ipflare$");
-        let record = DnsRecord {
-            id: "r1".to_string(),
-            name: "test".to_string(),
-            content: "1.2.3.4".to_string(),
-            proxied: None,
-            ttl: None,
-            comment: None,
-        };
-        assert!(!h.is_managed_record(&record));
-    }
-
     // --- final_delete ---
 
     #[tokio::test]
@@ -1635,81 +1681,7 @@ mod tests {
 
     // --- CloudflareHandle::new ---
 
-    #[test]
-    fn cloudflare_handle_new_constructs() {
-        let h = CloudflareHandle::new(
-            Auth::Token("tok".to_string()),
-            Duration::from_secs(10),
-            None,
-            None,
-        );
-        assert_eq!(h.base_url, "https://api.cloudflare.com/client/v4");
-    }
-
     // --- API error paths ---
-
-    #[tokio::test]
-    async fn api_get_returns_none_on_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
-            .mount(&server)
-            .await;
-
-        let h = handle(&server.uri());
-        let pp = PP::new(false, true); // quiet
-        let result: Option<CfListResponse<serde_json::Value>> = h
-            .api_request(reqwest::Method::GET, "zones", None::<&()>, &pp)
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn api_post_returns_none_on_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
-            .mount(&server)
-            .await;
-
-        let h = handle(&server.uri());
-        let pp = PP::new(false, true);
-        let body = serde_json::json!({"test": true});
-        let result: Option<CfResponse<serde_json::Value>> = h
-            .api_request(reqwest::Method::POST, "endpoint", Some(&body), &pp)
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn api_put_returns_none_on_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("PUT"))
-            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
-            .mount(&server)
-            .await;
-
-        let h = handle(&server.uri());
-        let pp = PP::new(false, true);
-        let body = serde_json::json!({"test": true});
-        let result: Option<CfResponse<serde_json::Value>> = h
-            .api_request(reqwest::Method::PUT, "endpoint", Some(&body), &pp)
-            .await;
-        assert!(result.is_none());
-    }
-
-    #[tokio::test]
-    async fn api_delete_returns_none_on_http_error() {
-        let server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("error"))
-            .mount(&server)
-            .await;
-
-        let h = handle(&server.uri());
-        let pp = PP::new(false, true);
-        assert!(!h.delete_record("z1", "r1", &pp).await);
-    }
 
     // --- set_ips: update due to proxied change ---
 

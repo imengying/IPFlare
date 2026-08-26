@@ -60,7 +60,7 @@ Each GitHub Release archive contains only the executable. Builds are published
 for:
 
 - Linux x86_64 and aarch64 (static musl binaries, including Alpine)
-- macOS x86_64 and Apple Silicon
+- macOS Apple Silicon
 - Windows x86_64
 
 To build from source:
@@ -128,7 +128,6 @@ separate working directory and service when managing a different zone.
 | `detection_timeout` | string | `5s` | Public IP lookup timeout |
 | `update_timeout` | string | `30s` | Cloudflare API timeout |
 | `reject_cloudflare_ips` | boolean | `true` | Reject addresses in Cloudflare's published ranges |
-| `emoji` | boolean | `true` | Enable emoji in output |
 | `quiet` | boolean | `false` | Suppress informational output |
 | `telegram` | object/null | `null` | Telegram Bot API credentials |
 
@@ -260,10 +259,10 @@ rc-service ipflare status
 
 ## Releases
 
-Push a version tag matching `Cargo.toml`, for example `v2.2.0`. The workflow
-runs the test suite, builds native binaries, creates SHA-256 checksums, and
-publishes a GitHub Release. Commit subjects since the previous tag are used as
-the release changelog.
+Push a version tag, for example `v2.2.0`; the workflow applies the tag version to
+`Cargo.toml`. It runs the test suite, builds native binaries, and publishes a
+GitHub Release. Commit subjects since the previous tag are used as the release
+changelog.
 
 ## License
 

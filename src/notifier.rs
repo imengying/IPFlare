@@ -1,4 +1,4 @@
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use reqwest::Client;
 use std::time::Duration;
 
@@ -62,10 +62,10 @@ impl Notifier {
             return;
         }
 
-        if let Some(telegram) = &self.telegram {
-            if !telegram.send(message).await {
-                ppfmt.warningf(pp::EMOJI_WARNING, "Failed to send Telegram notification");
-            }
+        if let Some(telegram) = &self.telegram
+            && !telegram.send(message).await
+        {
+            ppfmt.warningf("Failed to send Telegram notification");
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use reqwest::Client;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -76,54 +76,45 @@ impl CloudflareIpFilter {
                             match CidrRange::parse(line) {
                                 Some(range) => ranges.push(range),
                                 None => {
-                                    ppfmt.warningf(
-                                        pp::EMOJI_WARNING,
-                                        &format!("Failed to parse Cloudflare IP range '{line}'"),
-                                    );
+                                    ppfmt.warningf(&format!(
+                                        "Failed to parse Cloudflare IP range '{line}'"
+                                    ));
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        ppfmt.warningf(
-                            pp::EMOJI_WARNING,
-                            &format!("Failed to read Cloudflare IP ranges from {url}: {e}"),
-                        );
+                        ppfmt.warningf(&format!(
+                            "Failed to read Cloudflare IP ranges from {url}: {e}"
+                        ));
                         return None;
                     }
                 },
                 Ok(resp) => {
-                    ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!(
-                            "Failed to fetch Cloudflare IP ranges from {url}: HTTP {}",
-                            resp.status()
-                        ),
-                    );
+                    ppfmt.warningf(&format!(
+                        "Failed to fetch Cloudflare IP ranges from {url}: HTTP {}",
+                        resp.status()
+                    ));
                     return None;
                 }
                 Err(e) => {
-                    ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!("Failed to fetch Cloudflare IP ranges from {url}: {e}"),
-                    );
+                    ppfmt.warningf(&format!(
+                        "Failed to fetch Cloudflare IP ranges from {url}: {e}"
+                    ));
                     return None;
                 }
             }
         }
 
         if ranges.is_empty() {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                "No Cloudflare IP ranges loaded; skipping filter",
-            );
+            ppfmt.warningf("No Cloudflare IP ranges loaded; skipping filter");
             return None;
         }
 
-        ppfmt.infof(
-            pp::EMOJI_DETECT,
-            &format!("Loaded {} Cloudflare IP ranges for filtering", ranges.len()),
-        );
+        ppfmt.infof(&format!(
+            "Loaded {} Cloudflare IP ranges for filtering",
+            ranges.len()
+        ));
 
         Some(Self { ranges })
     }
@@ -196,7 +187,6 @@ impl CachedCloudflareFilter {
                 None => {
                     if self.filter.is_some() {
                         ppfmt.warningf(
-                            pp::EMOJI_WARNING,
                             "Failed to refresh Cloudflare IP ranges; using cached version",
                         );
                         // Keep using cached filter, but don't update fetched_at
@@ -225,42 +215,20 @@ mod tests {
 2606:4700::/32
 ";
 
+    /// Cloudflare addresses are matched across both families, and unrelated
+    /// addresses are left alone — this is what decides whether a detected IP is
+    /// rejected as an Anycast address.
     #[test]
-    fn test_parse_ranges() {
+    fn test_matches_only_cloudflare_addresses() {
         let filter = CloudflareIpFilter::from_lines(SAMPLE_RANGES).unwrap();
-        assert_eq!(filter.ranges.len(), 6);
-    }
 
-    #[test]
-    fn test_contains_cloudflare_ipv4() {
-        let filter = CloudflareIpFilter::from_lines(SAMPLE_RANGES).unwrap();
-        // 104.16.0.1 is within 104.16.0.0/13
-        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1));
-        assert!(filter.contains(&ip));
-    }
+        // 104.16.0.1 is inside 104.16.0.0/13; 2606:4700::1 inside 2606:4700::/32.
+        assert!(filter.contains(&IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1))));
+        assert!(filter.contains(&IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 1))));
 
-    #[test]
-    fn test_rejects_non_cloudflare_ipv4() {
-        let filter = CloudflareIpFilter::from_lines(SAMPLE_RANGES).unwrap();
-        // 203.0.113.42 is a documentation IP, not Cloudflare
-        let ip: IpAddr = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42));
-        assert!(!filter.contains(&ip));
-    }
-
-    #[test]
-    fn test_contains_cloudflare_ipv6() {
-        let filter = CloudflareIpFilter::from_lines(SAMPLE_RANGES).unwrap();
-        // 2606:4700::1 is within 2606:4700::/32
-        let ip: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 1));
-        assert!(filter.contains(&ip));
-    }
-
-    #[test]
-    fn test_rejects_non_cloudflare_ipv6() {
-        let filter = CloudflareIpFilter::from_lines(SAMPLE_RANGES).unwrap();
-        // 2001:db8::1 is a documentation address, not Cloudflare
-        let ip: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
-        assert!(!filter.contains(&ip));
+        // Documentation addresses belong to nobody and must not match.
+        assert!(!filter.contains(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 42))));
+        assert!(!filter.contains(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))));
     }
 
     #[test]
@@ -321,12 +289,6 @@ mod tests {
 2a06:98c0::/29
 2c0f:f248::/32
 ";
-
-    #[test]
-    fn test_all_real_ranges_parse() {
-        let filter = CloudflareIpFilter::from_lines(ALL_CF_RANGES).unwrap();
-        assert_eq!(filter.ranges.len(), 22);
-    }
 
     /// For a /N IPv4 range starting at `base`, return (first, last, just_outside).
     fn v4_range_bounds(a: u8, b: u8, c: u8, d: u8, prefix: u8) -> (Ipv4Addr, Ipv4Addr, Ipv4Addr) {

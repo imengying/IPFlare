@@ -407,7 +407,7 @@ resolve_tag() {
 }
 
 install_or_update() {
-    require_commands awk chmod head install mktemp rm sed sha256sum tar tr
+    require_commands awk chmod head install mktemp rm sed tar tr
     select_downloader
     ensure_temp_dir
     resolve_platform
@@ -418,13 +418,6 @@ install_or_update() {
 
     echo "正在下载 ${asset}..."
     download_file "${release_base}/${asset}" "${temp_dir}/${asset}"
-    download_file "${release_base}/SHA256SUMS" "${temp_dir}/SHA256SUMS"
-
-    expected_checksum="$(awk -v asset="${asset}" '$2 == asset { print $1 }' \
-        "${temp_dir}/SHA256SUMS")"
-    [ -n "${expected_checksum}" ] || fail "发布文件中没有 ${asset} 的校验值"
-    actual_checksum="$(sha256sum "${temp_dir}/${asset}" | awk '{ print $1 }')"
-    [ "${actual_checksum}" = "${expected_checksum}" ] || fail "SHA-256 校验失败"
 
     tar -xzf "${temp_dir}/${asset}" -C "${temp_dir}"
     [ -f "${temp_dir}/ipflare" ] || fail "发布包中没有 ipflare"

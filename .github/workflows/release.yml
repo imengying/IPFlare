@@ -57,10 +57,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             archive_name: linux-aarch64
             extension: tar.gz
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            archive_name: macos-x86_64
-            extension: tar.gz
           - runner: macos-15
             target: aarch64-apple-darwin
             archive_name: macos-aarch64
@@ -156,12 +152,9 @@ jobs:
           pattern: "*"
           merge-multiple: true
 
-      - name: Generate checksums and release notes
+      - name: Generate release notes
         shell: bash
         run: |
-          cd dist
-          sha256sum ipflare-* > SHA256SUMS
-          cd ..
           previous_tag="$(git describe --tags --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null || true)"
           if [[ -n "$previous_tag" ]]; then
             git log --reverse --format='- %s (`%h`)' "$previous_tag..$GITHUB_SHA" > RELEASE_NOTES.md

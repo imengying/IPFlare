@@ -57,7 +57,7 @@ Telegram。
 每个 Release 压缩包只包含程序本体：
 
 - Linux x86_64 和 aarch64（静态 musl 程序，支持 Alpine）
-- macOS x86_64 和 Apple Silicon
+- macOS Apple Silicon
 - Windows x86_64
 
 从源码构建：
@@ -121,7 +121,6 @@ cp config-example.json config.json
 | `detection_timeout` | string | `5s` | 公网 IP 检测超时 |
 | `update_timeout` | string | `30s` | Cloudflare API 请求超时 |
 | `reject_cloudflare_ips` | boolean | `true` | 拒绝 Cloudflare 官方网段中的地址 |
-| `emoji` | boolean | `true` | 输出中使用 Emoji |
 | `quiet` | boolean | `false` | 隐藏普通信息 |
 | `telegram` | object/null | `null` | Telegram Bot API 配置 |
 

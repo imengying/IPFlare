@@ -1,7 +1,7 @@
 use crate::cloudflare::{Auth, Ttl, WAFList};
 use crate::domain;
 use crate::notifier::{Notifier, TelegramNotifier};
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use crate::provider::{IpType, ProviderType};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -31,7 +31,6 @@ pub struct AppConfig {
     pub update_timeout: Duration,
     pub reject_cloudflare_ips: bool,
     pub dry_run: bool,
-    pub emoji: bool,
     pub quiet: bool,
     pub telegram: Option<TelegramConfig>,
 }
@@ -109,8 +108,6 @@ struct FileConfig {
     update_timeout: String,
     #[serde(default = "default_true")]
     reject_cloudflare_ips: bool,
-    #[serde(default = "default_true")]
-    emoji: bool,
     #[serde(default)]
     quiet: bool,
     #[serde(default)]
@@ -364,7 +361,6 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
         update_timeout: parse_duration(&file.update_timeout, "update_timeout")?,
         reject_cloudflare_ips: file.reject_cloudflare_ips,
         dry_run,
-        emoji: file.emoji,
         quiet: file.quiet,
         telegram: parse_telegram(file.telegram)?,
     })
@@ -383,14 +379,11 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
 
     match TelegramNotifier::new(&telegram.bot_token, &telegram.chat_id) {
         Ok(notifier) => {
-            ppfmt.infof(pp::EMOJI_NOTIFY, "Notifications: Telegram");
+            ppfmt.infof("Notifications: Telegram");
             Notifier::telegram(notifier)
         }
         Err(error) => {
-            ppfmt.errorf(
-                pp::EMOJI_ERROR,
-                &format!("Failed to setup Telegram notifications: {error}"),
-            );
+            ppfmt.errorf(&format!("Failed to setup Telegram notifications: {error}"));
             Notifier::disabled()
         }
     }
@@ -398,38 +391,40 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
 
 pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
     let inner = ppfmt.indent();
-    ppfmt.noticef(pp::EMOJI_CONFIG, "Configuration:");
-    inner.infof("", &format!("Account ID: {}", config.account_id));
-    inner.infof("", &format!("Zone ID: {}", config.zone_id));
+    ppfmt.noticef("Configuration:");
+    inner.infof(&format!("Account ID: {}", config.account_id));
+    inner.infof(&format!("Zone ID: {}", config.zone_id));
 
     for ip_type in [IpType::V4, IpType::V6] {
         if let Some(domains) = config.domains.get(&ip_type) {
-            inner.noticef(
-                "",
-                &format!("{} domains: {}", ip_type.describe(), domains.join(", ")),
-            );
+            inner.noticef(&format!(
+                "{} domains: {}",
+                ip_type.describe(),
+                domains.join(", ")
+            ));
         }
         if let Some(provider) = config.providers.get(&ip_type) {
-            inner.infof(
-                "",
-                &format!("{} provider: {}", ip_type.describe(), provider.name()),
-            );
+            inner.infof(&format!(
+                "{} provider: {}",
+                ip_type.describe(),
+                provider.name()
+            ));
         }
     }
 
     for waf_list in &config.waf_lists {
-        inner.noticef("", &format!("WAF list: {}", waf_list.describe()));
+        inner.noticef(&format!("WAF list: {}", waf_list.describe()));
     }
-    inner.infof("", &format!("TTL: {}", config.ttl.describe()));
-    inner.infof("", &format!("Schedule: {}", config.update_cron.describe()));
+    inner.infof(&format!("TTL: {}", config.ttl.describe()));
+    inner.infof(&format!("Schedule: {}", config.update_cron.describe()));
     if config.delete_on_stop {
-        inner.infof("", "Delete on stop: enabled");
+        inner.infof("Delete on stop: enabled");
     }
     if !config.reject_cloudflare_ips {
-        inner.warningf("", "Cloudflare IP rejection: disabled");
+        inner.warningf("Cloudflare IP rejection: disabled");
     }
     if let Some(comment) = &config.record_comment {
-        inner.infof("", &format!("Record comment: {comment}"));
+        inner.infof(&format!("Record comment: {comment}"));
     }
 }
 

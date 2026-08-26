@@ -2,7 +2,7 @@ use crate::cf_ip_filter::CachedCloudflareFilter;
 use crate::cloudflare::{CloudflareHandle, SetResult};
 use crate::config::AppConfig;
 use crate::notifier::{Message, Notifier};
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use crate::provider::{DetectionOutcome, IpType};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
@@ -30,20 +30,22 @@ pub async fn update_once(
     let mut detection_failed: HashSet<IpType> = HashSet::new();
 
     for (ip_type, provider) in &config.providers {
-        ppfmt.infof(
-            pp::EMOJI_DETECT,
-            &format!("Detecting {} via {}", ip_type.describe(), provider.name()),
-        );
+        ppfmt.infof(&format!(
+            "Detecting {} via {}",
+            ip_type.describe(),
+            provider.name()
+        ));
         match provider
             .detect(detection_client, *ip_type, config.detection_timeout, ppfmt)
             .await
         {
             DetectionOutcome::Ips(ips) => {
                 let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
-                ppfmt.infof(
-                    pp::EMOJI_DETECT,
-                    &format!("Detected {}: {}", ip_type.describe(), ip_strs.join(", ")),
-                );
+                ppfmt.infof(&format!(
+                    "Detected {}: {}",
+                    ip_type.describe(),
+                    ip_strs.join(", ")
+                ));
                 messages.push(Message::new_ok(&format!(
                     "Detected {}: {}",
                     ip_type.describe(),
@@ -52,19 +54,14 @@ pub async fn update_once(
                 detected_ips.insert(*ip_type, ips);
             }
             DetectionOutcome::NoIp => {
-                ppfmt.warningf(
-                    pp::EMOJI_WARNING,
-                    &format!("No {} address detected", ip_type.describe()),
-                );
+                ppfmt.warningf(&format!("No {} address detected", ip_type.describe()));
                 messages.push(Message::new_fail(&format!(
                     "Failed to detect {} address",
                     ip_type.describe()
                 )));
             }
             DetectionOutcome::Failed => {
-                ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!(
+                ppfmt.warningf(&format!(
                             "{} detection failed; skipping {} updates this cycle (existing records preserved)",
                             ip_type.describe(),
                             ip_type.describe()
@@ -89,22 +86,17 @@ pub async fn update_once(
                 let before_count = ips.len();
                 ips.retain(|ip| {
                     if cf_filter.contains(ip) {
-                        ppfmt.warningf(
-                            pp::EMOJI_WARNING,
-                            &format!(
-                                "Rejected {ip}: matches Cloudflare IP range ({})",
-                                ip_type.describe()
-                            ),
-                        );
+                        ppfmt.warningf(&format!(
+                            "Rejected {ip}: matches Cloudflare IP range ({})",
+                            ip_type.describe()
+                        ));
                         false
                     } else {
                         true
                     }
                 });
                 if ips.is_empty() && before_count > 0 {
-                    ppfmt.warningf(
-                            pp::EMOJI_WARNING,
-                            &format!(
+                    ppfmt.warningf(&format!(
                                 "All detected {} addresses were Cloudflare IPs; skipping updates for this type",
                                 ip_type.describe()
                             ),
@@ -118,9 +110,7 @@ pub async fn update_once(
                 }
             }
         } else if !detected_ips.is_empty() {
-            ppfmt.warningf(
-                    pp::EMOJI_WARNING,
-                    "Could not fetch Cloudflare IP ranges; skipping update to avoid writing Cloudflare IPs",
+            ppfmt.warningf("Could not fetch Cloudflare IP ranges; skipping update to avoid writing Cloudflare IPs",
                 );
             detection_failed.extend(detected_ips.keys().copied());
             detected_ips.clear();
@@ -135,22 +125,17 @@ pub async fn update_once(
             // Transient detection failure: the real IP is unknown, so never
             // touch existing records - not even with delete_on_failure set.
             if detection_failed.contains(ip_type) {
-                ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!(
-                            "Skipping {} update for {}: IP detection failed (existing records preserved)",
-                            ip_type.describe(),
-                            domains.join(", ")
-                        ),
-                    );
+                ppfmt.warningf(&format!(
+                    "Skipping {} update for {}: IP detection failed (existing records preserved)",
+                    ip_type.describe(),
+                    domains.join(", ")
+                ));
                 continue;
             }
             // Definitive "no address of this family": deletion is the
             // documented DELETE_ON_FAILURE=true behavior; otherwise skip.
             if !config.delete_on_failure {
-                ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!(
+                ppfmt.warningf(&format!(
                             "Skipping {} update for {}: no {} address detected (existing records preserved)",
                             ip_type.describe(),
                             domains.join(", "),
@@ -210,10 +195,7 @@ pub async fn update_once(
                 }
                 SetResult::Noop => {
                     if noop_reported.insert(noop_key) {
-                        ppfmt.infof(
-                            pp::EMOJI_SKIP,
-                            &format!("Record {domain_str} is up to date"),
-                        );
+                        ppfmt.infof(&format!("Record {domain_str} is up to date"));
                     }
                 }
             }
@@ -226,18 +208,27 @@ pub async fn update_once(
     // IPs from the list. Preserve the list until detection recovers.
     for waf_list in &config.waf_lists {
         if !detection_failed.is_empty() {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!(
-                    "Skipping WAF list {} update: IP detection failed (existing items preserved)",
-                    waf_list.describe()
-                ),
-            );
+            ppfmt.warningf(&format!(
+                "Skipping WAF list {} update: IP detection failed (existing items preserved)",
+                waf_list.describe()
+            ));
             continue;
         }
 
         // Collect all detected IPs for WAF lists
         let all_ips: Vec<IpAddr> = detected_ips.values().flatten().copied().collect();
+
+        // Every configured family definitively reports no address. Clearing the
+        // list is the documented delete_on_failure=true behavior; otherwise
+        // preserve the items, mirroring the DNS path above. Without this an
+        // allow-list would be emptied the moment the host loses its address.
+        if all_ips.is_empty() && !config.delete_on_failure {
+            ppfmt.warningf(&format!(
+                "Skipping WAF list {} update: no address detected (existing items preserved)",
+                waf_list.describe()
+            ));
+            continue;
+        }
 
         let result = handle
             .set_waf_list(
@@ -270,10 +261,7 @@ pub async fn update_once(
             }
             SetResult::Noop => {
                 if noop_reported.insert(noop_key) {
-                    ppfmt.infof(
-                        pp::EMOJI_SKIP,
-                        &format!("WAF list {} is up to date", waf_list.describe()),
-                    );
+                    ppfmt.infof(&format!("WAF list {} is up to date", waf_list.describe()));
                 }
             }
         }
@@ -351,7 +339,7 @@ mod tests {
 
     fn pp() -> PP {
         // quiet=true suppresses output during tests
-        PP::new(false, true)
+        PP::new(true)
     }
 
     fn empty_notifier() -> Notifier {
@@ -399,7 +387,6 @@ mod tests {
             update_timeout: Duration::from_secs(5),
             reject_cloudflare_ips: false,
             dry_run,
-            emoji: false,
             quiet: true,
             telegram: None,
         }
@@ -905,6 +892,76 @@ mod tests {
             ok,
             "skipping WAF update on detection failure should not be an error"
         );
+    }
+
+    /// A deterministic provider reporting "no address of this family" must not
+    /// wipe an existing WAF list while delete_on_failure is false. The DNS path
+    /// already gates deletion on that flag; the WAF path must match.
+    #[tokio::test]
+    async fn test_update_once_no_ip_preserves_waf_list_when_delete_on_failure_disabled() {
+        let server = MockServer::start().await;
+        let account_id = "acc-123";
+        let list_name = "my_list";
+        let list_id = "list-id-1";
+
+        Mock::given(method("GET"))
+            .and(path(format!("/accounts/{account_id}/rules/lists")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(waf_lists_response(list_id, list_name)),
+            )
+            .mount(&server)
+            .await;
+
+        // The list already holds the previously published address.
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/accounts/{account_id}/rules/lists/{list_id}/items"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(waf_items_response(
+                serde_json::json!([{ "ip": "198.51.100.42" }]),
+            )))
+            .mount(&server)
+            .await;
+
+        // Clearing the list would issue a PUT; it must not happen.
+        Mock::given(method("PUT"))
+            .and(path(format!(
+                "/accounts/{account_id}/rules/lists/{list_id}/items"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "success": true,
+                "result": { "operation_id": "op-1" }
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        // Literal provider with no V4 address: a definitive NoIp, not a failure.
+        let mut providers = HashMap::new();
+        providers.insert(IpType::V4, ProviderType::Literal { ips: Vec::new() });
+        let waf_list = WAFList {
+            account_id: account_id.to_string(),
+            list_name: list_name.to_string(),
+        };
+
+        // delete_on_failure stays false here.
+        let config = make_config_preserving(providers, HashMap::new(), vec![waf_list], false);
+        let cf = handle(&server.uri());
+        let notifier = empty_notifier();
+        let ppfmt = pp();
+
+        let mut cf_cache = CachedCloudflareFilter::new();
+        let ok = update_once(
+            &config,
+            &cf,
+            &notifier,
+            &mut cf_cache,
+            &ppfmt,
+            &mut HashSet::new(),
+            &crate::test_client(),
+        )
+        .await;
+        assert!(ok);
     }
 
     /// Issue #277: if only one address family fails detection transiently, the

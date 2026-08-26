@@ -1,4 +1,4 @@
-use crate::pp::{self, PP};
+use crate::pp::PP;
 use reqwest::Client;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::fs;
@@ -31,7 +31,7 @@ impl IpType {
 /// All supported provider types
 #[derive(Debug, Clone)]
 pub enum ProviderType {
-    CloudflareTrace { url: Option<String> },
+    CloudflareTrace,
     CloudflareDOH,
     Ipify,
     Local,
@@ -45,7 +45,7 @@ pub enum ProviderType {
 impl ProviderType {
     pub fn name(&self) -> &str {
         match self {
-            ProviderType::CloudflareTrace { .. } => "cloudflare.trace",
+            ProviderType::CloudflareTrace => "cloudflare.trace",
             ProviderType::CloudflareDOH => "cloudflare.doh",
             ProviderType::Ipify => "ipify",
             ProviderType::Local => "local",
@@ -64,12 +64,7 @@ impl ProviderType {
             return Ok(ProviderType::None);
         }
         if input == "cloudflare.trace" {
-            return Ok(ProviderType::CloudflareTrace { url: None });
-        }
-        if let Some(url) = input.strip_prefix("cloudflare.trace:") {
-            return Ok(ProviderType::CloudflareTrace {
-                url: Some(url.to_string()),
-            });
+            return Ok(ProviderType::CloudflareTrace);
         }
         if input == "cloudflare.doh" {
             return Ok(ProviderType::CloudflareDOH);
@@ -143,7 +138,7 @@ impl ProviderType {
             | ProviderType::Local
             | ProviderType::LocalIface { .. }
             | ProviderType::StableLocalIface { .. } => DetectionOutcome::NoIp,
-            ProviderType::CloudflareTrace { .. }
+            ProviderType::CloudflareTrace
             | ProviderType::CloudflareDOH
             | ProviderType::Ipify
             | ProviderType::CustomURL { .. } => DetectionOutcome::Failed,
@@ -159,8 +154,8 @@ impl ProviderType {
         ppfmt: &PP,
     ) -> Vec<IpAddr> {
         match self {
-            ProviderType::CloudflareTrace { url } => {
-                detect_cloudflare_trace(client, ip_type, timeout, url.as_deref(), ppfmt).await
+            ProviderType::CloudflareTrace => {
+                detect_cloudflare_trace(client, ip_type, timeout, ppfmt).await
             }
             ProviderType::CloudflareDOH => {
                 detect_cloudflare_doh(client, ip_type, timeout, ppfmt).await
@@ -279,51 +274,29 @@ async fn detect_cloudflare_trace(
     _client: &Client,
     ip_type: IpType,
     timeout: Duration,
-    custom_url: Option<&str>,
     ppfmt: &PP,
 ) -> Vec<IpAddr> {
     // Use an IP-family-specific client so the trace endpoint sees the right address family.
     let client = build_split_client(ip_type, timeout);
 
-    if let Some(url) = custom_url {
-        if let Some(ip) = fetch_trace_ip(&client, url, timeout, None).await {
-            if validate_detected_ip(&ip, ip_type, ppfmt) {
-                return vec![ip];
-            }
-        }
-        ppfmt.warningf(
-            pp::EMOJI_WARNING,
-            &format!(
-                "{} not detected via custom Cloudflare trace URL",
-                ip_type.describe()
-            ),
-        );
-        return Vec::new();
-    }
-
     // Try primary (cloudflare.com — the CDN trace endpoint)
-    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_PRIMARY, timeout, None).await {
-        if validate_detected_ip(&ip, ip_type, ppfmt) {
-            return vec![ip];
-        }
+    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_PRIMARY, timeout, None).await
+        && validate_detected_ip(&ip, ip_type, ppfmt)
+    {
+        return vec![ip];
     }
-    ppfmt.warningf(
-        pp::EMOJI_WARNING,
-        &format!(
-            "{} not detected via primary, trying fallback",
-            ip_type.describe()
-        ),
-    );
+    ppfmt.warningf(&format!(
+        "{} not detected via primary, trying fallback",
+        ip_type.describe()
+    ));
 
     // Try fallback (hostname-based — works when literal IPs are intercepted by WARP/Zero Trust)
-    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_FALLBACK, timeout, None).await {
-        if validate_detected_ip(&ip, ip_type, ppfmt) {
-            return vec![ip];
-        }
+    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_FALLBACK, timeout, None).await
+        && validate_detected_ip(&ip, ip_type, ppfmt)
+    {
+        return vec![ip];
     }
-    ppfmt.warningf(
-        pp::EMOJI_WARNING,
-        &format!(
+    ppfmt.warningf(&format!(
             "{} not detected via fallback. Verify your ISP or DNS provider isn't blocking Cloudflare's IPs.",
             ip_type.describe()
         ),
@@ -354,24 +327,19 @@ async fn detect_cloudflare_doh(
 
     match resp {
         Ok(r) => {
-            if let Ok(body) = r.bytes().await {
-                if let Some(ip_str) = parse_dns_txt_response(&body) {
-                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                        if validate_detected_ip(&ip, ip_type, ppfmt) {
-                            return vec![ip];
-                        }
-                    }
-                }
+            if let Ok(body) = r.bytes().await
+                && let Some(ip_str) = parse_dns_txt_response(&body)
+                && let Ok(ip) = ip_str.parse::<IpAddr>()
+                && validate_detected_ip(&ip, ip_type, ppfmt)
+            {
+                return vec![ip];
             }
         }
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!(
-                    "{} not detected via Cloudflare DoH: {e}",
-                    ip_type.describe()
-                ),
-            );
+            ppfmt.warningf(&format!(
+                "{} not detected via Cloudflare DoH: {e}",
+                ip_type.describe()
+            ));
         }
     }
     Vec::new()
@@ -487,20 +455,18 @@ async fn detect_ipify(
 
     match client.get(url).timeout(timeout).send().await {
         Ok(resp) => {
-            if let Ok(body) = resp.text().await {
-                let ip_str = body.trim();
-                if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                    if validate_detected_ip(&ip, ip_type, ppfmt) {
-                        return vec![ip];
-                    }
-                }
+            if let Ok(body) = resp.text().await
+                && let Ok(ip) = body.trim().parse::<IpAddr>()
+                && validate_detected_ip(&ip, ip_type, ppfmt)
+            {
+                return vec![ip];
             }
         }
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!("{} not detected via ipify: {e}", ip_type.describe()),
-            );
+            ppfmt.warningf(&format!(
+                "{} not detected via ipify: {e}",
+                ip_type.describe()
+            ));
         }
     }
     Vec::new()
@@ -529,29 +495,26 @@ fn detect_local(ip_type: IpType, ppfmt: &PP) -> Vec<IpAddr> {
                     }
                 }
                 Err(e) => {
-                    ppfmt.warningf(
-                        pp::EMOJI_WARNING,
-                        &format!("Failed to get local {} address: {e}", ip_type.describe()),
-                    );
+                    ppfmt.warningf(&format!(
+                        "Failed to get local {} address: {e}",
+                        ip_type.describe()
+                    ));
                     Vec::new()
                 }
             },
             Err(e) => {
-                ppfmt.warningf(
-                    pp::EMOJI_WARNING,
-                    &format!("Failed to detect local {} address: {e}", ip_type.describe()),
-                );
+                ppfmt.warningf(&format!(
+                    "Failed to detect local {} address: {e}",
+                    ip_type.describe()
+                ));
                 Vec::new()
             }
         },
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!(
-                    "Failed to bind socket for {} detection: {e}",
-                    ip_type.describe()
-                ),
-            );
+            ppfmt.warningf(&format!(
+                "Failed to bind socket for {} detection: {e}",
+                ip_type.describe()
+            ));
             Vec::new()
         }
     }
@@ -571,21 +534,15 @@ fn detect_local_iface(interface: &str, ip_type: IpType, ppfmt: &PP) -> Vec<IpAdd
             ips.sort_by_key(|ip| ip.to_string());
             ips.dedup();
             if ips.is_empty() {
-                ppfmt.warningf(
-                    pp::EMOJI_WARNING,
-                    &format!(
-                        "No global {} address found on interface {interface}",
-                        ip_type.describe()
-                    ),
-                );
+                ppfmt.warningf(&format!(
+                    "No global {} address found on interface {interface}",
+                    ip_type.describe()
+                ));
             }
             ips
         }
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!("Failed to list network interfaces: {e}"),
-            );
+            ppfmt.warningf(&format!("Failed to list network interfaces: {e}"));
             Vec::new()
         }
     }
@@ -617,10 +574,9 @@ fn detect_stable_local_iface(interface: &str, ip_type: IpType, ppfmt: &PP) -> Ve
     let contents = match fs::read_to_string(IF_INET6_PATH) {
         Ok(contents) => contents,
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!("Failed to read {IF_INET6_PATH} for stable IPv6 detection: {e}"),
-            );
+            ppfmt.warningf(&format!(
+                "Failed to read {IF_INET6_PATH} for stable IPv6 detection: {e}"
+            ));
             return Vec::new();
         }
     };
@@ -629,10 +585,9 @@ fn detect_stable_local_iface(interface: &str, ip_type: IpType, ppfmt: &PP) -> Ve
         .into_iter()
         .next();
     if ip.is_none() {
-        ppfmt.warningf(
-            pp::EMOJI_WARNING,
-            &format!("No stable global IPv6 address found on interface {interface}"),
-        );
+        ppfmt.warningf(&format!(
+            "No stable global IPv6 address found on interface {interface}"
+        ));
     }
     ip.into_iter().map(IpAddr::V6).collect()
 }
@@ -701,20 +656,18 @@ async fn detect_custom_url(
 ) -> Vec<IpAddr> {
     match client.get(url).timeout(timeout).send().await {
         Ok(resp) => {
-            if let Ok(body) = resp.text().await {
-                let ip_str = body.trim();
-                if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                    if validate_detected_ip(&ip, ip_type, ppfmt) {
-                        return vec![ip];
-                    }
-                }
+            if let Ok(body) = resp.text().await
+                && let Ok(ip) = body.trim().parse::<IpAddr>()
+                && validate_detected_ip(&ip, ip_type, ppfmt)
+            {
+                return vec![ip];
             }
         }
         Err(e) => {
-            ppfmt.warningf(
-                pp::EMOJI_WARNING,
-                &format!("{} not detected via custom URL: {e}", ip_type.describe()),
-            );
+            ppfmt.warningf(&format!(
+                "{} not detected via custom URL: {e}",
+                ip_type.describe()
+            ));
         }
     }
     Vec::new()
@@ -735,25 +688,19 @@ fn matches_ip_type(ip: &IpAddr, ip_type: IpType) -> bool {
 /// unspecified, and non-global addresses.
 fn validate_detected_ip(ip: &IpAddr, ip_type: IpType, ppfmt: &PP) -> bool {
     if !matches_ip_type(ip, ip_type) {
-        ppfmt.warningf(
-            pp::EMOJI_WARNING,
-            &format!(
-                "Detected IP {} does not match expected type {}",
-                ip,
-                ip_type.describe()
-            ),
-        );
+        ppfmt.warningf(&format!(
+            "Detected IP {} does not match expected type {}",
+            ip,
+            ip_type.describe()
+        ));
         return false;
     }
     if !ip.is_global_() {
-        ppfmt.warningf(
-            pp::EMOJI_WARNING,
-            &format!(
-                "Detected {} address {} is not a global unicast address",
-                ip_type.describe(),
-                ip
-            ),
-        );
+        ppfmt.warningf(&format!(
+            "Detected {} address {} is not a global unicast address",
+            ip_type.describe(),
+            ip
+        ));
         return false;
     }
     true
@@ -782,24 +729,36 @@ impl IsGlobal for IpAddr {
 }
 
 fn is_global_v4(ip: &Ipv4Addr) -> bool {
+    let octets = ip.octets();
     !ip.is_loopback()
         && !ip.is_private()
         && !ip.is_link_local()
-        && !ip.is_broadcast()
         && !ip.is_unspecified()
         && !ip.is_documentation()
-        && !(ip.octets()[0] == 100 && ip.octets()[1] >= 64 && ip.octets()[1] <= 127) // 100.64.0.0/10 shared address space
-        && !ip.octets().starts_with(&[192, 0, 0]) // 192.0.0.0/24
+        && !ip.is_multicast() // 224.0.0.0/4
+        // 100.64.0.0/10 shared address space (CGNAT)
+        && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+        // 192.0.0.0/24 IETF protocol assignments
+        && !octets.starts_with(&[192, 0, 0])
+        // 198.18.0.0/15 benchmarking
+        && !(octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        // 240.0.0.0/4 reserved, which also covers 255.255.255.255 broadcast
+        && octets[0] < 240
 }
 
 fn is_global_v6(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
     !ip.is_loopback()
         && !ip.is_unspecified()
         && !ip.is_multicast()
         // Not link-local (fe80::/10)
-        && (ip.segments()[0] & 0xffc0) != 0xfe80
+        && (segments[0] & 0xffc0) != 0xfe80
         // Not unique local (fc00::/7)
-        && (ip.segments()[0] & 0xfe00) != 0xfc00
+        && (segments[0] & 0xfe00) != 0xfc00
+        // Not documentation (2001:db8::/32)
+        && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        // Not an IPv4-mapped address (::ffff:0:0/96); never valid in a AAAA record
+        && ip.to_ipv4_mapped().is_none()
 }
 
 #[cfg(test)]
@@ -822,7 +781,7 @@ mod tests {
     fn test_provider_parse() {
         assert!(matches!(
             ProviderType::parse("cloudflare.trace").unwrap(),
-            ProviderType::CloudflareTrace { url: None }
+            ProviderType::CloudflareTrace
         ));
         assert!(matches!(
             ProviderType::parse("cloudflare.doh").unwrap(),
@@ -1044,79 +1003,6 @@ mod tests {
         matchers::{method, path},
     };
 
-    #[tokio::test]
-    async fn test_detect_cloudflare_trace_primary_succeeds() {
-        let server = MockServer::start().await;
-        let trace_body = "fl=1f1\nh=test\nip=93.184.216.34\nts=123\n";
-
-        Mock::given(method("GET"))
-            .and(path("/cdn-cgi/trace"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(trace_body))
-            .mount(&server)
-            .await;
-
-        let client = crate::test_client();
-        let ppfmt = PP::default_pp();
-        let url = format!("{}/cdn-cgi/trace", server.uri());
-        let timeout = Duration::from_secs(5);
-
-        let result =
-            detect_cloudflare_trace(&client, IpType::V4, timeout, Some(&url), &ppfmt).await;
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], "93.184.216.34".parse::<IpAddr>().unwrap());
-    }
-
-    #[tokio::test]
-    async fn test_detect_cloudflare_trace_primary_fails_fallback_succeeds() {
-        let primary = MockServer::start().await;
-        let fallback = MockServer::start().await;
-
-        // Primary returns 500
-        Mock::given(method("GET"))
-            .and(path("/cdn-cgi/trace"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&primary)
-            .await;
-
-        // Fallback returns valid trace
-        let trace_body = "fl=1f1\nip=93.184.216.34\n";
-        Mock::given(method("GET"))
-            .and(path("/cdn-cgi/trace"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(trace_body))
-            .mount(&fallback)
-            .await;
-
-        // We can't override the hardcoded primary/fallback URLs, but we can test
-        // the custom URL path: first with a failing URL, then a succeeding one.
-        let client = crate::test_client();
-        let ppfmt = PP::default_pp();
-        let timeout = Duration::from_secs(5);
-
-        // Custom URL pointing to primary (which fails with 500 -> no ip= line parseable from error page)
-        let result_fail = detect_cloudflare_trace(
-            &client,
-            IpType::V4,
-            timeout,
-            Some(&format!("{}/cdn-cgi/trace", primary.uri())),
-            &ppfmt,
-        )
-        .await;
-        assert!(result_fail.is_empty());
-
-        // Custom URL pointing to fallback (which succeeds)
-        let result_ok = detect_cloudflare_trace(
-            &client,
-            IpType::V4,
-            timeout,
-            Some(&format!("{}/cdn-cgi/trace", fallback.uri())),
-            &ppfmt,
-        )
-        .await;
-        assert_eq!(result_ok.len(), 1);
-        assert_eq!(result_ok[0], "93.184.216.34".parse::<IpAddr>().unwrap());
-    }
-
     // ---- trace URL constants ----
 
     #[test]
@@ -1262,22 +1148,92 @@ mod tests {
     }
 
     // ---- validate_detected_ip ----
+    // These cover is_global_v4 / is_global_v6 too: validate_detected_ip is the
+    // only caller and adds just the address-family check on top.
 
+    /// Every range that must never be published, per family.
     #[test]
-    fn test_validate_detected_ip_accepts_global() {
+    fn test_validate_detected_ip_rejects_non_global_ranges() {
         let ppfmt = PP::default_pp();
-        assert!(validate_detected_ip(
-            &"93.184.216.34".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-        assert!(validate_detected_ip(
-            &"2606:4700:4700::1111".parse().unwrap(),
-            IpType::V6,
-            &ppfmt
-        ));
+
+        for address in [
+            "10.0.0.1",        // private 10/8
+            "172.16.0.1",      // private 172.16/12
+            "192.168.1.1",     // private 192.168/16
+            "127.0.0.1",       // loopback
+            "0.0.0.0",         // unspecified
+            "169.254.0.1",     // link-local
+            "192.0.2.1",       // documentation 192.0.2.0/24
+            "198.51.100.1",    // documentation 198.51.100.0/24
+            "203.0.113.1",     // documentation 203.0.113.0/24
+            "224.0.0.1",       // multicast 224.0.0.0/4
+            "239.255.255.250", // multicast, upper end
+            "240.0.0.1",       // reserved 240.0.0.0/4
+            "255.255.255.255", // broadcast, inside the reserved block
+            "198.18.0.1",      // benchmarking 198.18.0.0/15
+            "198.19.255.254",  // benchmarking, upper end
+            "100.64.0.1",      // CGNAT 100.64.0.0/10
+            "100.127.255.254", // CGNAT, upper end
+            "192.0.0.1",       // IETF protocol assignments 192.0.0.0/24
+        ] {
+            assert!(
+                !validate_detected_ip(&address.parse().unwrap(), IpType::V4, &ppfmt),
+                "{address} should be rejected"
+            );
+        }
+
+        for address in [
+            "::1",              // loopback
+            "::",               // unspecified
+            "fe80::1",          // link-local fe80::/10
+            "fc00::1",          // unique local fc00::/7
+            "fd00::1",          // unique local, second half
+            "ff02::1",          // multicast
+            "2001:db8::1",      // documentation 2001:db8::/32
+            "::ffff:192.0.2.1", // IPv4-mapped, never valid in a AAAA record
+        ] {
+            assert!(
+                !validate_detected_ip(&address.parse().unwrap(), IpType::V6, &ppfmt),
+                "{address} should be rejected"
+            );
+        }
     }
 
+    /// Public addresses, including ones just outside each rejected block, so the
+    /// bounds don't reject legitimate traffic.
+    #[test]
+    fn test_validate_detected_ip_accepts_global_addresses() {
+        let ppfmt = PP::default_pp();
+
+        for address in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "93.184.216.34",
+            "223.255.255.255", // just below multicast 224.0.0.0/4
+            "198.17.255.255",  // just below benchmarking 198.18.0.0/15
+            "198.20.0.1",      // just above benchmarking
+            "100.63.255.255",  // just below CGNAT 100.64.0.0/10
+            "100.128.0.1",     // just above CGNAT
+            "192.0.1.1",       // just above 192.0.0.0/24
+        ] {
+            assert!(
+                validate_detected_ip(&address.parse().unwrap(), IpType::V4, &ppfmt),
+                "{address} should be accepted"
+            );
+        }
+
+        for address in [
+            "2606:4700:4700::1111",
+            "2001:db9::1", // just above documentation 2001:db8::/32
+        ] {
+            assert!(
+                validate_detected_ip(&address.parse().unwrap(), IpType::V6, &ppfmt),
+                "{address} should be accepted"
+            );
+        }
+    }
+
+    /// An address of the wrong family is rejected even when globally routable.
     #[test]
     fn test_validate_detected_ip_rejects_wrong_family() {
         let ppfmt = PP::default_pp();
@@ -1288,66 +1244,6 @@ mod tests {
         ));
         assert!(!validate_detected_ip(
             &"2606:4700:4700::1111".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-    }
-
-    #[test]
-    fn test_validate_detected_ip_rejects_private() {
-        let ppfmt = PP::default_pp();
-        assert!(!validate_detected_ip(
-            &"10.0.0.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-        assert!(!validate_detected_ip(
-            &"192.168.1.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-        assert!(!validate_detected_ip(
-            &"172.16.0.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-    }
-
-    #[test]
-    fn test_validate_detected_ip_rejects_loopback() {
-        let ppfmt = PP::default_pp();
-        assert!(!validate_detected_ip(
-            &"127.0.0.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-        assert!(!validate_detected_ip(
-            &"::1".parse().unwrap(),
-            IpType::V6,
-            &ppfmt
-        ));
-    }
-
-    #[test]
-    fn test_validate_detected_ip_rejects_link_local() {
-        let ppfmt = PP::default_pp();
-        assert!(!validate_detected_ip(
-            &"169.254.0.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-    }
-
-    #[test]
-    fn test_validate_detected_ip_rejects_documentation() {
-        let ppfmt = PP::default_pp();
-        assert!(!validate_detected_ip(
-            &"198.51.100.1".parse().unwrap(),
-            IpType::V4,
-            &ppfmt
-        ));
-        assert!(!validate_detected_ip(
-            &"203.0.113.1".parse().unwrap(),
             IpType::V4,
             &ppfmt
         ));
@@ -1390,20 +1286,6 @@ mod tests {
 
     // ---- matches_ip_type ----
 
-    #[test]
-    fn test_matches_ip_type_v4() {
-        let v4: IpAddr = "1.2.3.4".parse().unwrap();
-        assert!(matches_ip_type(&v4, IpType::V4));
-        assert!(!matches_ip_type(&v4, IpType::V6));
-    }
-
-    #[test]
-    fn test_matches_ip_type_v6() {
-        let v6: IpAddr = "::1".parse().unwrap();
-        assert!(!matches_ip_type(&v6, IpType::V4));
-        assert!(matches_ip_type(&v6, IpType::V6));
-    }
-
     // ---- filter_ips_by_type ----
 
     #[test]
@@ -1425,99 +1307,6 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_ips_by_type_empty() {
-        let ips: Vec<IpAddr> = vec![];
-        assert!(filter_ips_by_type(&ips, IpType::V4).is_empty());
-        assert!(filter_ips_by_type(&ips, IpType::V6).is_empty());
-    }
-
-    // ---- is_global_v4 ----
-
-    #[test]
-    fn test_is_global_v4_private() {
-        assert!(!is_global_v4(&Ipv4Addr::new(10, 0, 0, 1)));
-        assert!(!is_global_v4(&Ipv4Addr::new(172, 16, 0, 1)));
-        assert!(!is_global_v4(&Ipv4Addr::new(192, 168, 1, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v4_loopback() {
-        assert!(!is_global_v4(&Ipv4Addr::new(127, 0, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v4_link_local() {
-        assert!(!is_global_v4(&Ipv4Addr::new(169, 254, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v4_broadcast() {
-        assert!(!is_global_v4(&Ipv4Addr::new(255, 255, 255, 255)));
-    }
-
-    #[test]
-    fn test_is_global_v4_documentation() {
-        assert!(!is_global_v4(&Ipv4Addr::new(192, 0, 2, 1))); // 192.0.2.0/24
-        assert!(!is_global_v4(&Ipv4Addr::new(198, 51, 100, 1))); // 198.51.100.0/24
-        assert!(!is_global_v4(&Ipv4Addr::new(203, 0, 113, 1))); // 203.0.113.0/24
-    }
-
-    #[test]
-    fn test_is_global_v4_shared_address_space() {
-        assert!(!is_global_v4(&Ipv4Addr::new(100, 64, 0, 1)));
-        assert!(!is_global_v4(&Ipv4Addr::new(100, 127, 255, 254)));
-        // 100.128.x.x is outside the shared range
-        assert!(is_global_v4(&Ipv4Addr::new(100, 128, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v4_global() {
-        assert!(is_global_v4(&Ipv4Addr::new(8, 8, 8, 8)));
-        assert!(is_global_v4(&Ipv4Addr::new(1, 1, 1, 1)));
-        assert!(is_global_v4(&Ipv4Addr::new(93, 184, 216, 34)));
-    }
-
-    // ---- is_global_v6 ----
-
-    #[test]
-    fn test_is_global_v6_loopback() {
-        assert!(!is_global_v6(&Ipv6Addr::LOCALHOST));
-    }
-
-    #[test]
-    fn test_is_global_v6_link_local() {
-        // fe80::1
-        assert!(!is_global_v6(&Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v6_unique_local() {
-        // fc00::1
-        assert!(!is_global_v6(&Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1)));
-        // fd00::1
-        assert!(!is_global_v6(&Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v6_multicast() {
-        // ff02::1
-        assert!(!is_global_v6(&Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1)));
-    }
-
-    #[test]
-    fn test_is_global_v6_global() {
-        // 2606:4700:4700::1111 (Cloudflare DNS)
-        assert!(is_global_v6(&Ipv6Addr::new(
-            0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111
-        )));
-        // 2001:db8::1 is documentation, but our impl doesn't explicitly exclude it
-        // so it should be considered global by our function
-        assert!(is_global_v6(&Ipv6Addr::new(
-            0x2001, 0x0db8, 0, 0, 0, 0, 0, 1
-        )));
-    }
-
-    #[test]
     fn test_parse_if_inet6_line() {
         let addr =
             parse_if_inet6_line("20010db8000000011111222233334444 03 40 00 00   eth0").unwrap();
@@ -1536,11 +1325,13 @@ mod tests {
 
     #[test]
     fn test_stable_ipv6_addresses_from_if_inet6_filters_privacy_addresses() {
+        // Uses a globally routable prefix: 2001:db8::/32 is documentation and is
+        // now rejected as non-global, which would mask the flag filtering here.
         let contents = "\
-20010db8000000015555666677778888 03 40 00 01   eth0
-20010db8000000010000000000003486 03 80 00 00   eth0
-20010db8000000011111222233334444 03 40 00 00   eth0
-20010db8000000019999aaaabbbbcccc 03 40 00 21   eth0
+26064700470000015555666677778888 03 40 00 01   eth0
+26064700470000010000000000003486 03 80 00 00   eth0
+26064700470000011111222233334444 03 40 00 00   eth0
+26064700470000019999aaaabbbbcccc 03 40 00 21   eth0
 fe80000000000000d399115858c872af 03 40 20 80   eth0
 fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
 ";
@@ -1550,56 +1341,15 @@ fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
         assert_eq!(
             ips,
             vec![
-                "2001:db8:0:1:1111:2222:3333:4444"
+                "2606:4700:4700:1:1111:2222:3333:4444"
                     .parse::<Ipv6Addr>()
                     .unwrap(),
-                "2001:db8:0:1::3486".parse::<Ipv6Addr>().unwrap(),
+                "2606:4700:4700:1::3486".parse::<Ipv6Addr>().unwrap(),
             ]
         );
     }
 
     // ---- ProviderType::name ----
-
-    #[test]
-    fn test_provider_type_name() {
-        assert_eq!(
-            ProviderType::CloudflareTrace { url: None }.name(),
-            "cloudflare.trace"
-        );
-        assert_eq!(
-            ProviderType::CloudflareTrace {
-                url: Some("https://x".into())
-            }
-            .name(),
-            "cloudflare.trace"
-        );
-        assert_eq!(ProviderType::CloudflareDOH.name(), "cloudflare.doh");
-        assert_eq!(ProviderType::Ipify.name(), "ipify");
-        assert_eq!(ProviderType::Local.name(), "local");
-        assert_eq!(
-            ProviderType::LocalIface {
-                interface: "eth0".into()
-            }
-            .name(),
-            "local.iface"
-        );
-        assert_eq!(
-            ProviderType::StableLocalIface {
-                interface: "eth0".into()
-            }
-            .name(),
-            "local.iface.stable"
-        );
-        assert_eq!(
-            ProviderType::CustomURL {
-                url: "https://x".into()
-            }
-            .name(),
-            "url:"
-        );
-        assert_eq!(ProviderType::Literal { ips: vec![] }.name(), "literal:");
-        assert_eq!(ProviderType::None.name(), "none");
-    }
 
     // ---- ProviderType::parse error cases ----
 

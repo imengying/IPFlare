@@ -212,6 +212,32 @@ fn parse_domain_args(tokens: &[String]) -> Result<(Vec<String>, &[String]), Stri
 mod tests {
     use super::*;
 
+    /// Malformed expressions must be rejected at config-load time rather than
+    /// silently evaluating to false, which would quietly unproxy every domain.
+    #[test]
+    fn rejects_malformed_expressions() {
+        for (expression, expected_fragment) in [
+            ("is(a.com) & is(b.com)", "&&"),
+            ("is(a.com) | is(b.com)", "||"),
+            ("(is(a.com)", "parenthesis"),
+        ] {
+            let error = parse_proxied_expression(expression)
+                .err()
+                .unwrap_or_else(|| panic!("{expression} should be rejected"));
+            assert!(
+                error.contains(expected_fragment),
+                "error for {expression} was: {error}"
+            );
+        }
+
+        for expression in ["is(a.com) $ is(b.com)", "true false", "is(", "&&"] {
+            assert!(
+                parse_proxied_expression(expression).is_err(),
+                "{expression} should be rejected"
+            );
+        }
+    }
+
     #[test]
     fn test_proxied_expr_true() {
         let pred = parse_proxied_expression("true").unwrap();
@@ -268,28 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenizer_single_ampersand_error() {
-        let result = parse_proxied_expression("is(a.com) & is(b.com)");
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(err.contains("&&"), "error was: {err}");
-    }
-
-    #[test]
-    fn test_tokenizer_single_pipe_error() {
-        let result = parse_proxied_expression("is(a.com) | is(b.com)");
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(err.contains("||"), "error was: {err}");
-    }
-
-    #[test]
-    fn test_tokenizer_unexpected_character_error() {
-        let result = parse_proxied_expression("is(a.com) $ is(b.com)");
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_parse_and_expr_double_ampersand() {
         let pred = parse_proxied_expression("is(a.com) && is(b.com)").unwrap();
         assert!(!pred("a.com"));
@@ -307,22 +311,5 @@ mod tests {
         assert!(pred("a.com"));
         assert!(pred("b.com"));
         assert!(!pred("c.com"));
-    }
-
-    #[test]
-    fn test_parse_missing_closing_paren() {
-        let result = parse_proxied_expression("(is(a.com)");
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(
-            err.contains("parenthesis") || err.contains(")"),
-            "error was: {err}"
-        );
-    }
-
-    #[test]
-    fn test_parse_unexpected_tokens_after_expr() {
-        let result = parse_proxied_expression("true false");
-        assert!(result.is_err());
     }
 }

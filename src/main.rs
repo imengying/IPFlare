@@ -48,12 +48,9 @@ async fn main() {
         }
     };
 
-    let ppfmt = PP::new(app_config.emoji, app_config.quiet);
+    let ppfmt = PP::new(app_config.quiet);
     if dry_run {
-        ppfmt.noticef(
-            pp::EMOJI_WARNING,
-            "[DRY RUN] No records will be created, updated, or deleted.",
-        );
+        ppfmt.noticef("[DRY RUN] No records will be created, updated, or deleted.");
     }
     config::print_config_summary(&app_config, &ppfmt);
 
@@ -91,7 +88,7 @@ async fn main() {
     .await;
 
     if app_config.delete_on_stop {
-        ppfmt.noticef(pp::EMOJI_STOP, "Deleting records on stop...");
+        ppfmt.noticef("Deleting records on stop...");
         success &= updater::final_delete(&app_config, &handle, &notifier, &ppfmt).await;
     }
     if !success {
@@ -152,13 +149,10 @@ async fn run_schedule(
         .update_cron
         .next_duration()
         .unwrap_or(Duration::from_secs(300));
-    ppfmt.noticef(
-        pp::EMOJI_LAUNCH,
-        &format!(
-            "Started ipflare, updating every {}",
-            describe_duration(interval)
-        ),
-    );
+    ppfmt.noticef(&format!(
+        "Started ipflare, updating every {}",
+        describe_duration(interval)
+    ));
 
     if config.update_on_start {
         updater::update_once(
@@ -174,23 +168,18 @@ async fn run_schedule(
     }
 
     while running.load(Ordering::SeqCst) {
-        ppfmt.infof(
-            pp::EMOJI_SLEEP,
-            &format!("Next update in {}", describe_duration(interval)),
-        );
-        for _ in 0..interval.as_secs() {
-            if !running.load(Ordering::SeqCst) {
-                return true;
-            }
-            sleep(Duration::from_secs(1)).await;
-        }
+        // Spread the wait around the configured interval rather than always
+        // after it, so the average cycle matches what the user configured.
+        let max_jitter = jitter_bound(interval.as_secs());
+        let random_value = if max_jitter > 0 {
+            rand::rng().random_range(0..=(max_jitter * 2))
+        } else {
+            0
+        };
+        let wait = jitter_duration(interval.as_secs(), random_value);
 
-        let max_jitter = interval.as_secs() / 5;
-        if max_jitter > 0 {
-            let random_value = rand::rng().random_range(0..=max_jitter);
-            sleep(jitter_duration(interval.as_secs(), random_value)).await;
-        }
-        if !running.load(Ordering::SeqCst) {
+        ppfmt.infof(&format!("Next update in {}", describe_duration(wait)));
+        if !sleep_until_shutdown(wait, &running).await {
             return true;
         }
 
@@ -209,12 +198,36 @@ async fn run_schedule(
     true
 }
 
-fn jitter_duration(interval_secs: u64, random_value: u64) -> Duration {
-    let max_jitter = interval_secs / 5;
-    if max_jitter == 0 {
-        return Duration::ZERO;
+/// Sleep in one-second steps so a shutdown signal is noticed promptly.
+/// Returns false if shutdown was requested before the wait elapsed.
+async fn sleep_until_shutdown(wait: Duration, running: &AtomicBool) -> bool {
+    let mut remaining = wait;
+    while !remaining.is_zero() {
+        if !running.load(Ordering::SeqCst) {
+            return false;
+        }
+        let step = remaining.min(Duration::from_secs(1));
+        sleep(step).await;
+        remaining -= step;
     }
-    Duration::from_secs(random_value % (max_jitter + 1))
+    running.load(Ordering::SeqCst)
+}
+
+/// Half-width of the jitter window: 10% of the interval, so the wait lands
+/// within ±10% of the configured value.
+fn jitter_bound(interval_secs: u64) -> u64 {
+    interval_secs / 10
+}
+
+/// Apply `random_value` (expected in `0..=jitter_bound*2`) as an offset centred
+/// on the interval, keeping the average cycle equal to the configured interval.
+fn jitter_duration(interval_secs: u64, random_value: u64) -> Duration {
+    let max_jitter = jitter_bound(interval_secs);
+    if max_jitter == 0 {
+        return Duration::from_secs(interval_secs);
+    }
+    let offset = random_value.min(max_jitter * 2);
+    Duration::from_secs(interval_secs + offset - max_jitter)
 }
 
 fn describe_duration(duration: Duration) -> String {
@@ -262,11 +275,35 @@ pub(crate) fn test_client() -> reqwest::Client {
 mod tests {
     use super::*;
 
+    /// The wait is centred on the interval: ±10%, never a one-sided addition.
     #[test]
-    fn jitter_stays_within_limit() {
-        assert_eq!(jitter_duration(300, 30), Duration::from_secs(30));
-        assert_eq!(jitter_duration(300, 61), Duration::ZERO);
-        assert_eq!(jitter_duration(4, 99), Duration::ZERO);
+    fn jitter_is_centred_on_the_interval() {
+        // 300s interval => bound 30s => window 270..=330s.
+        assert_eq!(jitter_duration(300, 0), Duration::from_secs(270));
+        assert_eq!(jitter_duration(300, 30), Duration::from_secs(300));
+        assert_eq!(jitter_duration(300, 60), Duration::from_secs(330));
+        // Out-of-range input is clamped, not wrapped, so it can never
+        // collapse the wait to zero.
+        assert_eq!(jitter_duration(300, 999), Duration::from_secs(330));
+    }
+
+    /// Short intervals have no room for jitter and must wait the full interval.
+    #[test]
+    fn jitter_preserves_short_intervals() {
+        assert_eq!(jitter_bound(9), 0);
+        assert_eq!(jitter_duration(9, 99), Duration::from_secs(9));
+        assert_eq!(jitter_duration(1, 0), Duration::from_secs(1));
+    }
+
+    /// The mean of the jitter window equals the configured interval.
+    #[test]
+    fn jitter_window_averages_to_the_interval() {
+        let bound = jitter_bound(600);
+        let total: u64 = (0..=(bound * 2))
+            .map(|value| jitter_duration(600, value).as_secs())
+            .sum();
+        let samples = bound * 2 + 1;
+        assert_eq!(total / samples, 600);
     }
 
     #[test]
