@@ -8,8 +8,10 @@ use tokio::time::{Instant, sleep};
 
 // --- Ttl ---
 
+/// A record TTL. The field is private so every value goes through [`Ttl::new`]
+/// and cannot bypass the below-30 clamp Cloudflare requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ttl(pub i64);
+pub struct Ttl(i64);
 
 impl Ttl {
     pub const AUTO: Ttl = Ttl(1);
@@ -18,7 +20,7 @@ impl Ttl {
         if value < 30 { Ttl::AUTO } else { Ttl(value) }
     }
 
-    pub fn value(&self) -> i64 {
+    pub fn seconds(&self) -> i64 {
         self.0
     }
 
@@ -33,16 +35,19 @@ impl Ttl {
 
 // --- Auth ---
 
+/// An API token. Cloudflare also accepts the legacy Global API Key, which this
+/// project deliberately does not support. No invariant to guard, so the field
+/// stays crate-visible for assertions.
 #[derive(Debug, Clone)]
-pub enum Auth {
-    Token(String),
-}
+pub struct Auth(pub(crate) String);
 
 impl Auth {
+    pub fn token(token: &str) -> Self {
+        Self(token.to_string())
+    }
+
     pub fn apply(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match self {
-            Auth::Token(token) => req.header("Authorization", format!("Bearer {token}")),
-        }
+        req.header("Authorization", format!("Bearer {}", self.0))
     }
 }
 
@@ -304,7 +309,7 @@ impl CloudflareHandle {
                             // HTTP 200 and success: false; the reason is only in
                             // the errors array.
                             if value.is_failure() {
-                                ppfmt.errorf(&format!(
+                                ppfmt.warningf(&format!(
                                     "API {method} '{url}' failed: {}",
                                     value.error_summary()
                                 ));
@@ -312,7 +317,7 @@ impl CloudflareHandle {
                             Some(value)
                         }
                         Err(error) => {
-                            ppfmt.errorf(&format!(
+                            ppfmt.warningf(&format!(
                                 "API {method} '{url}' returned invalid JSON: {error}"
                             ));
                             None
@@ -334,14 +339,14 @@ impl CloudflareHandle {
                                 text.to_string()
                             }
                         });
-                    ppfmt.errorf(&format!(
+                    ppfmt.warningf(&format!(
                         "API {method} '{url_str}' failed: HTTP {status}: {detail}"
                     ));
                     None
                 }
             }
             Err(e) => {
-                ppfmt.errorf(&format!("API {method} '{url}' error: {e}"));
+                ppfmt.warningf(&format!("API {method} '{url}' error: {e}"));
                 None
             }
         }
@@ -507,12 +512,12 @@ impl CloudflareHandle {
             let mut success = true;
             for record in &managed {
                 if dry_run {
-                    ppfmt.noticef(&format!(
+                    ppfmt.infof(&format!(
                         "[DRY RUN] Would delete record {fqdn} ({})",
                         record.content
                     ));
                 } else {
-                    ppfmt.noticef(&format!("Deleting record {fqdn} ({})", record.content));
+                    ppfmt.infof(&format!("Deleting record {fqdn} ({})", record.content));
                     success &= self.delete_record(zone_id, &record.id, ppfmt).await;
                 }
             }
@@ -540,7 +545,7 @@ impl CloudflareHandle {
                 used_record_ids.push(&record.id);
                 // Check if update needed (proxied or Ttl changed)
                 let needs_update = record.proxied != Some(proxied)
-                    || (ttl != Ttl::AUTO && record.ttl != Some(ttl.value()))
+                    || (ttl != Ttl::AUTO && record.ttl != Some(ttl.seconds()))
                     || (comment.is_some() && record.comment.as_deref() != comment);
 
                 if needs_update {
@@ -550,13 +555,13 @@ impl CloudflareHandle {
                         name: fqdn.to_string(),
                         content: ip_str.clone(),
                         proxied,
-                        ttl: ttl.value(),
+                        ttl: ttl.seconds(),
                         comment: comment.map(|s| s.to_string()),
                     };
                     if dry_run {
-                        ppfmt.noticef(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
+                        ppfmt.infof(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
                     } else {
-                        ppfmt.noticef(&format!("Updating record {fqdn} -> {ip_str}"));
+                        ppfmt.infof(&format!("Updating record {fqdn} -> {ip_str}"));
                         success &= self
                             .update_record(zone_id, &record.id, &payload, ppfmt)
                             .await
@@ -574,7 +579,7 @@ impl CloudflareHandle {
                     name: fqdn.to_string(),
                     content: ip_str.clone(),
                     proxied,
-                    ttl: ttl.value(),
+                    ttl: ttl.seconds(),
                     comment: comment.map(|s| s.to_string()),
                 };
 
@@ -582,9 +587,9 @@ impl CloudflareHandle {
                     used_record_ids.push(&record.id);
                     any_change = true;
                     if dry_run {
-                        ppfmt.noticef(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
+                        ppfmt.infof(&format!("[DRY RUN] Would update record {fqdn} -> {ip_str}"));
                     } else {
-                        ppfmt.noticef(&format!("Updating record {fqdn} -> {ip_str}"));
+                        ppfmt.infof(&format!("Updating record {fqdn} -> {ip_str}"));
                         success &= self
                             .update_record(zone_id, &record.id, &payload, ppfmt)
                             .await
@@ -593,11 +598,11 @@ impl CloudflareHandle {
                 } else {
                     any_change = true;
                     if dry_run {
-                        ppfmt.noticef(&format!(
+                        ppfmt.infof(&format!(
                             "[DRY RUN] Would add new record {fqdn} -> {ip_str}"
                         ));
                     } else {
-                        ppfmt.noticef(&format!("Adding new record {fqdn} -> {ip_str}"));
+                        ppfmt.infof(&format!("Adding new record {fqdn} -> {ip_str}"));
                         success &= self.create_record(zone_id, &payload, ppfmt).await.is_some();
                     }
                 }
@@ -609,12 +614,12 @@ impl CloudflareHandle {
             if !used_record_ids.contains(&&record.id) {
                 any_change = true;
                 if dry_run {
-                    ppfmt.noticef(&format!(
+                    ppfmt.infof(&format!(
                         "[DRY RUN] Would delete stale record {} ({})",
                         fqdn, record.content
                     ));
                 } else if success {
-                    ppfmt.noticef(&format!(
+                    ppfmt.infof(&format!(
                         "Deleting stale record {} ({})",
                         fqdn, record.content
                     ));
@@ -649,7 +654,7 @@ impl CloudflareHandle {
         let mut success = true;
         for record in &existing {
             if self.is_managed_record(record) {
-                ppfmt.noticef(&format!("Deleting record {fqdn} ({})", record.content));
+                ppfmt.infof(&format!("Deleting record {fqdn} ({})", record.content));
                 success &= self.delete_record(zone_id, &record.id, ppfmt).await;
             }
         }
@@ -707,7 +712,7 @@ impl CloudflareHandle {
                 return Some(items);
             };
             if !seen_cursors.insert(next.clone()) {
-                ppfmt.errorf("WAF list pagination returned a repeated cursor");
+                ppfmt.warningf("WAF list pagination returned a repeated cursor");
                 return None;
             }
             cursor = Some(next);
@@ -756,7 +761,7 @@ impl CloudflareHandle {
             match status.status.as_str() {
                 "completed" => return true,
                 "failed" => {
-                    ppfmt.errorf(&format!(
+                    ppfmt.warningf(&format!(
                         "WAF list operation {operation_id} failed: {}",
                         status.error.as_deref().unwrap_or("unknown error")
                     ));
@@ -766,11 +771,11 @@ impl CloudflareHandle {
                     sleep(Duration::from_millis(250)).await;
                 }
                 "pending" | "running" => {
-                    ppfmt.errorf(&format!("WAF list operation {operation_id} timed out"));
+                    ppfmt.warningf(&format!("WAF list operation {operation_id} timed out"));
                     return false;
                 }
                 other => {
-                    ppfmt.errorf(&format!(
+                    ppfmt.warningf(&format!(
                         "WAF list operation {operation_id} returned status '{other}'"
                     ));
                     return false;
@@ -791,7 +796,7 @@ impl CloudflareHandle {
         let list_meta = match self.find_waf_list(waf_list, ppfmt).await {
             Some(meta) => meta,
             None => {
-                ppfmt.errorf(&format!("WAF list {} not found", waf_list.describe()));
+                ppfmt.warningf(&format!("WAF list {} not found", waf_list.describe()));
                 return SetResult::Failed;
             }
         };
@@ -836,14 +841,14 @@ impl CloudflareHandle {
 
         if dry_run {
             for ip in &to_add {
-                ppfmt.noticef(&format!(
+                ppfmt.infof(&format!(
                     "[DRY RUN] Would add {} to WAF list {}",
                     ip,
                     waf_list.describe()
                 ));
             }
             for ip in &ips_to_remove {
-                ppfmt.noticef(&format!(
+                ppfmt.infof(&format!(
                     "[DRY RUN] Would remove {} from WAF list {}",
                     ip,
                     waf_list.describe()
@@ -853,14 +858,14 @@ impl CloudflareHandle {
         }
 
         for ip in &ips_to_remove {
-            ppfmt.noticef(&format!(
+            ppfmt.infof(&format!(
                 "Removing {} from WAF list {}",
                 ip,
                 waf_list.describe()
             ));
         }
         for ip in &to_add {
-            ppfmt.noticef(&format!(
+            ppfmt.infof(&format!(
                 "Adding {} to WAF list {}",
                 ip,
                 waf_list.describe()
@@ -992,7 +997,7 @@ mod tests {
     }
 
     fn test_auth() -> Auth {
-        Auth::Token("test-token".to_string())
+        Auth::token("test-token")
     }
 
     /// Cloudflare's errors array is the only place the reason for a

@@ -50,7 +50,7 @@ async fn main() {
 
     let ppfmt = PP::new(app_config.quiet);
     if dry_run {
-        ppfmt.noticef("[DRY RUN] No records will be created, updated, or deleted.");
+        ppfmt.infof("[DRY RUN] No records will be created, updated, or deleted.");
     }
     config::print_config_summary(&app_config, &ppfmt);
 
@@ -71,10 +71,12 @@ async fn main() {
     });
 
     let mut cf_cache = cf_ip_filter::CachedCloudflareFilter::new();
-    let detection_client = Client::builder()
+    // Only used to fetch Cloudflare's published IP ranges. IP detection does not
+    // share this client: each network provider builds its own family-pinned one.
+    let range_client = Client::builder()
         .timeout(app_config.detection_timeout)
         .build()
-        .expect("Failed to build detection HTTP client");
+        .expect("Failed to build HTTP client for Cloudflare IP ranges");
 
     let mut success = run_schedule(
         &app_config,
@@ -83,12 +85,12 @@ async fn main() {
         &ppfmt,
         running,
         &mut cf_cache,
-        &detection_client,
+        &range_client,
     )
     .await;
 
     if app_config.delete_on_stop {
-        ppfmt.noticef("Deleting records on stop...");
+        ppfmt.infof("Deleting records on stop...");
         success &= updater::final_delete(&app_config, &handle, &notifier, &ppfmt).await;
     }
     if !success {
@@ -128,7 +130,7 @@ async fn run_schedule(
     ppfmt: &PP,
     running: Arc<AtomicBool>,
     cf_cache: &mut cf_ip_filter::CachedCloudflareFilter,
-    detection_client: &Client,
+    range_client: &Client,
 ) -> bool {
     let mut noop_reported = HashSet::new();
 
@@ -140,7 +142,7 @@ async fn run_schedule(
             cf_cache,
             ppfmt,
             &mut noop_reported,
-            detection_client,
+            range_client,
         )
         .await;
     }
@@ -149,7 +151,7 @@ async fn run_schedule(
         .update_cron
         .next_duration()
         .unwrap_or(Duration::from_secs(300));
-    ppfmt.noticef(&format!(
+    ppfmt.infof(&format!(
         "Started ipflare, updating every {}",
         describe_duration(interval)
     ));
@@ -162,7 +164,7 @@ async fn run_schedule(
             cf_cache,
             ppfmt,
             &mut noop_reported,
-            detection_client,
+            range_client,
         )
         .await;
     }
@@ -190,7 +192,7 @@ async fn run_schedule(
             cf_cache,
             ppfmt,
             &mut noop_reported,
-            detection_client,
+            range_client,
         )
         .await;
     }

@@ -121,14 +121,8 @@ impl ProviderType {
     /// callers must not touch existing DNS records. Local sources (interfaces,
     /// routing table, literals, `none`) are deterministic: an empty result is a
     /// true absence and `delete_on_failure` semantics may apply.
-    pub async fn detect(
-        &self,
-        client: &Client,
-        ip_type: IpType,
-        timeout: Duration,
-        ppfmt: &PP,
-    ) -> DetectionOutcome {
-        let ips = self.detect_ips(client, ip_type, timeout, ppfmt).await;
+    pub async fn detect(&self, ip_type: IpType, timeout: Duration, ppfmt: &PP) -> DetectionOutcome {
+        let ips = self.detect_ips(ip_type, timeout, ppfmt).await;
         if !ips.is_empty() {
             return DetectionOutcome::Ips(ips);
         }
@@ -146,28 +140,22 @@ impl ProviderType {
     }
 
     /// Detect IPs using this provider.
-    pub async fn detect_ips(
-        &self,
-        client: &Client,
-        ip_type: IpType,
-        timeout: Duration,
-        ppfmt: &PP,
-    ) -> Vec<IpAddr> {
+    ///
+    /// Network providers build their own family-pinned client rather than taking
+    /// a shared one, because the address they report depends on which family the
+    /// connection used. See [`build_split_client`].
+    pub async fn detect_ips(&self, ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Vec<IpAddr> {
         match self {
-            ProviderType::CloudflareTrace => {
-                detect_cloudflare_trace(client, ip_type, timeout, ppfmt).await
-            }
-            ProviderType::CloudflareDOH => {
-                detect_cloudflare_doh(client, ip_type, timeout, ppfmt).await
-            }
-            ProviderType::Ipify => detect_ipify(client, ip_type, timeout, ppfmt).await,
+            ProviderType::CloudflareTrace => detect_cloudflare_trace(ip_type, timeout, ppfmt).await,
+            ProviderType::CloudflareDOH => detect_cloudflare_doh(ip_type, timeout, ppfmt).await,
+            ProviderType::Ipify => detect_ipify(ip_type, timeout, ppfmt).await,
             ProviderType::Local => detect_local(ip_type, ppfmt),
             ProviderType::LocalIface { interface } => detect_local_iface(interface, ip_type, ppfmt),
             ProviderType::StableLocalIface { interface } => {
                 detect_stable_local_iface(interface, ip_type, ppfmt)
             }
             ProviderType::CustomURL { url } => {
-                detect_custom_url(client, url, ip_type, timeout, ppfmt).await
+                detect_custom_url(url, ip_type, timeout, ppfmt).await
             }
             ProviderType::Literal { ips } => filter_ips_by_type(ips, ip_type),
             ProviderType::None => Vec::new(),
@@ -208,17 +196,8 @@ pub fn parse_trace_ip(body: &str) -> Option<String> {
     None
 }
 
-async fn fetch_trace_ip(
-    client: &Client,
-    url: &str,
-    timeout: Duration,
-    host_override: Option<&str>,
-) -> Option<IpAddr> {
-    let mut req = client.get(url).timeout(timeout);
-    if let Some(host) = host_override {
-        req = req.header("Host", host);
-    }
-    let resp = req.send().await.ok()?;
+async fn fetch_trace_ip(client: &Client, url: &str, timeout: Duration) -> Option<IpAddr> {
+    let resp = client.get(url).timeout(timeout).send().await.ok()?;
     let body = resp.text().await.ok()?;
     let ip_str = parse_trace_ip(&body)?;
     ip_str.parse::<IpAddr>().ok()
@@ -261,26 +240,39 @@ impl Resolve for FilteredResolver {
 /// Uses a DNS-level filter to strip addresses of the wrong family from
 /// resolution results, ensuring the client never attempts a connection
 /// over the wrong protocol.
-pub fn build_split_client(ip_type: IpType, timeout: Duration) -> Client {
+///
+/// Every network-based provider needs this: an echo endpoint reports whichever
+/// family the connection actually used, so a dual-stack hostname on a shared
+/// client can answer an IPv6 query with an IPv4 address.
+pub fn build_split_client(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Client {
     let client_builder = Client::builder()
         .dns_resolver(FilteredResolver { ip_type })
         .timeout(timeout);
     #[cfg(test)]
     let client_builder = client_builder.no_proxy();
-    client_builder.build().unwrap_or_default()
+    match client_builder.build() {
+        Ok(client) => client,
+        Err(error) => {
+            // A default client is not family-pinned, so it can report the wrong
+            // address. validate_detected_ip still rejects a family mismatch, so
+            // this degrades to "no address detected" rather than a bad record.
+            ppfmt.warningf(&format!(
+                "Failed to build {}-only HTTP client ({error}); detection may not report an address",
+                ip_type.describe()
+            ));
+            Client::new()
+        }
+    }
 }
 
-async fn detect_cloudflare_trace(
-    _client: &Client,
-    ip_type: IpType,
-    timeout: Duration,
-    ppfmt: &PP,
-) -> Vec<IpAddr> {
-    // Use an IP-family-specific client so the trace endpoint sees the right address family.
-    let client = build_split_client(ip_type, timeout);
+/// Builds its own client rather than taking the shared one: the trace endpoint
+/// reports whichever family the connection used, so the address family has to
+/// be pinned at the DNS layer.
+async fn detect_cloudflare_trace(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Vec<IpAddr> {
+    let client = build_split_client(ip_type, timeout, ppfmt);
 
     // Try primary (cloudflare.com — the CDN trace endpoint)
-    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_PRIMARY, timeout, None).await
+    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_PRIMARY, timeout).await
         && validate_detected_ip(&ip, ip_type, ppfmt)
     {
         return vec![ip];
@@ -291,7 +283,7 @@ async fn detect_cloudflare_trace(
     ));
 
     // Try fallback (hostname-based — works when literal IPs are intercepted by WARP/Zero Trust)
-    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_FALLBACK, timeout, None).await
+    if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_FALLBACK, timeout).await
         && validate_detected_ip(&ip, ip_type, ppfmt)
     {
         return vec![ip];
@@ -307,12 +299,11 @@ async fn detect_cloudflare_trace(
 
 // --- Cloudflare DNS over HTTPS ---
 
-async fn detect_cloudflare_doh(
-    client: &Client,
-    ip_type: IpType,
-    timeout: Duration,
-    ppfmt: &PP,
-) -> Vec<IpAddr> {
+async fn detect_cloudflare_doh(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Vec<IpAddr> {
+    // whoami.cloudflare reports the address the query arrived from, so the
+    // connection has to be pinned to the family being detected.
+    let client = build_split_client(ip_type, timeout, ppfmt);
+
     // Construct a DNS query for whoami.cloudflare. TXT CH
     let query = build_dns_query(b"\x06whoami\x0Acloudflare\x00", 16, 3); // TXT=16, CH=3
 
@@ -442,12 +433,10 @@ fn rand_u16() -> u16 {
 
 // --- Ipify ---
 
-async fn detect_ipify(
-    client: &Client,
-    ip_type: IpType,
-    timeout: Duration,
-    ppfmt: &PP,
-) -> Vec<IpAddr> {
+async fn detect_ipify(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Vec<IpAddr> {
+    // api4/api6 are already single-family hostnames, so the split client is
+    // belt-and-braces here; it keeps every network provider on one code path.
+    let client = build_split_client(ip_type, timeout, ppfmt);
     let url = match ip_type {
         IpType::V4 => "https://api4.ipify.org",
         IpType::V6 => "https://api6.ipify.org",
@@ -488,7 +477,7 @@ fn detect_local(ip_type: IpType, ppfmt: &PP) -> Vec<IpAddr> {
             Ok(()) => match socket.local_addr() {
                 Ok(addr) => {
                     let ip = addr.ip();
-                    if matches_ip_type(&ip, ip_type) && ip.is_global_() {
+                    if matches_ip_type(&ip, ip_type) && is_global(&ip) {
                         vec![ip]
                     } else {
                         Vec::new()
@@ -529,7 +518,7 @@ fn detect_local_iface(interface: &str, ip_type: IpType, ppfmt: &PP) -> Vec<IpAdd
                 .iter()
                 .filter(|a| a.name == interface)
                 .map(|a| a.ip())
-                .filter(|ip| matches_ip_type(ip, ip_type) && ip.is_global_())
+                .filter(|ip| matches_ip_type(ip, ip_type) && is_global(ip))
                 .collect();
             ips.sort_by_key(|ip| ip.to_string());
             ips.dedup();
@@ -612,7 +601,7 @@ fn stable_ipv6_addresses_from_if_inet6(contents: &str, interface: &str) -> Vec<I
 
 fn is_stable_global_ipv6(addr: &IfInet6Address) -> bool {
     addr.scope == IPV6_SCOPE_GLOBAL
-        && IpAddr::V6(addr.ip).is_global_()
+        && is_global(&IpAddr::V6(addr.ip))
         && addr.flags & (IFA_F_TEMPORARY | IFA_F_DADFAILED | IFA_F_DEPRECATED | IFA_F_TENTATIVE)
             == 0
 }
@@ -648,12 +637,14 @@ fn parse_if_inet6_line(line: &str) -> Option<IfInet6Address> {
 // --- Custom URL ---
 
 async fn detect_custom_url(
-    client: &Client,
     url: &str,
     ip_type: IpType,
     timeout: Duration,
     ppfmt: &PP,
 ) -> Vec<IpAddr> {
+    // A user-supplied echo endpoint is usually dual-stack, so without pinning
+    // an IPv6 lookup can come back over IPv4 and report the wrong address.
+    let client = build_split_client(ip_type, timeout, ppfmt);
     match client.get(url).timeout(timeout).send().await {
         Ok(resp) => {
             if let Ok(body) = resp.text().await
@@ -695,7 +686,7 @@ fn validate_detected_ip(ip: &IpAddr, ip_type: IpType, ppfmt: &PP) -> bool {
         ));
         return false;
     }
-    if !ip.is_global_() {
+    if !is_global(ip) {
         ppfmt.warningf(&format!(
             "Detected {} address {} is not a global unicast address",
             ip_type.describe(),
@@ -713,18 +704,12 @@ fn filter_ips_by_type(ips: &[IpAddr], ip_type: IpType) -> Vec<IpAddr> {
         .collect()
 }
 
-/// Extension trait for IpAddr to check if it's a global address.
-/// std::net::IpAddr::is_global is unstable, so we implement it ourselves.
-trait IsGlobal {
-    fn is_global_(&self) -> bool;
-}
-
-impl IsGlobal for IpAddr {
-    fn is_global_(&self) -> bool {
-        match self {
-            IpAddr::V4(ip) => is_global_v4(ip),
-            IpAddr::V6(ip) => is_global_v6(ip),
-        }
+/// `std::net::IpAddr::is_global` is still unstable on the toolchain this builds
+/// with, so the check is hand-rolled.
+fn is_global(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_global_v4(ip),
+        IpAddr::V6(ip) => is_global_v6(ip),
     }
 }
 
@@ -1052,15 +1037,59 @@ mod tests {
 
     #[test]
     fn test_build_split_client_v4() {
-        let client = build_split_client(IpType::V4, Duration::from_secs(5));
+        let client = build_split_client(IpType::V4, Duration::from_secs(5), &PP::default_pp());
         // Client should build successfully with filtered resolver.
         drop(client);
     }
 
     #[test]
     fn test_build_split_client_v6() {
-        let client = build_split_client(IpType::V6, Duration::from_secs(5));
+        let client = build_split_client(IpType::V6, Duration::from_secs(5), &PP::default_pp());
         drop(client);
+    }
+
+    /// The point of the split client: a dual-stack hostname must only be
+    /// connected to over the requested family. wiremock listens on IPv4 only,
+    /// and `localhost` resolves to both families, so the V4 client reaches it
+    /// and the V6 client must not silently fall back to IPv4.
+    ///
+    /// Skipped when `localhost` has no IPv6 address, since there would be
+    /// nothing for the resolver to filter out.
+    #[tokio::test]
+    async fn split_client_refuses_the_other_family() {
+        crate::init_crypto();
+        let localhost_has_v6 = tokio::net::lookup_host(("localhost", 0))
+            .await
+            .map(|mut addrs| addrs.any(|addr| addr.is_ipv6()))
+            .unwrap_or(false);
+        if !localhost_has_v6 {
+            return;
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/my-ip"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("93.184.216.34"))
+            .mount(&server)
+            .await;
+        let port = server.address().port();
+        let url = format!("http://localhost:{port}/my-ip");
+        let timeout = Duration::from_secs(5);
+        let ppfmt = PP::default_pp();
+
+        let v4 = build_split_client(IpType::V4, timeout, &ppfmt);
+        let reached = v4.get(&url).timeout(timeout).send().await;
+        assert!(
+            reached.is_ok(),
+            "V4-pinned client should reach the IPv4 listener"
+        );
+
+        let v6 = build_split_client(IpType::V6, timeout, &ppfmt);
+        let blocked = v6.get(&url).timeout(timeout).send().await;
+        assert!(
+            blocked.is_err(),
+            "V6-pinned client must not fall back to the IPv4 listener"
+        );
     }
 
     // ---- detect_ipify with wiremock ----
@@ -1075,13 +1104,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
 
         // detect_ipify uses hardcoded URLs, so we test via detect_custom_url instead
         // which uses the same logic
-        let result = detect_custom_url(&client, &server.uri(), IpType::V4, timeout, &ppfmt).await;
+        let result = detect_custom_url(&server.uri(), IpType::V4, timeout, &ppfmt).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "93.184.216.34".parse::<IpAddr>().unwrap());
     }
@@ -1096,11 +1124,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
 
-        let result = detect_custom_url(&client, &server.uri(), IpType::V6, timeout, &ppfmt).await;
+        let result = detect_custom_url(&server.uri(), IpType::V6, timeout, &ppfmt).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "2606:4700:4700::1111".parse::<IpAddr>().unwrap());
     }
@@ -1117,12 +1144,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
         let url = format!("{}/my-ip", server.uri());
 
-        let result = detect_custom_url(&client, &url, IpType::V4, timeout, &ppfmt).await;
+        let result = detect_custom_url(&url, IpType::V4, timeout, &ppfmt).await;
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "93.184.216.34".parse::<IpAddr>().unwrap());
     }
@@ -1137,13 +1163,12 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
         let url = format!("{}/my-ip", server.uri());
 
         // 93.184.216.34 is IPv4 but we ask for V6 -> empty
-        let result = detect_custom_url(&client, &url, IpType::V6, timeout, &ppfmt).await;
+        let result = detect_custom_url(&url, IpType::V6, timeout, &ppfmt).await;
         assert!(result.is_empty());
     }
 
@@ -1259,12 +1284,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
         let url = format!("{}/my-ip", server.uri());
 
-        let result = detect_custom_url(&client, &url, IpType::V4, timeout, &ppfmt).await;
+        let result = detect_custom_url(&url, IpType::V4, timeout, &ppfmt).await;
         assert!(result.is_empty());
     }
 
@@ -1385,13 +1409,10 @@ fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
                 "5.6.7.8".parse().unwrap(),
             ],
         };
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
 
-        let result = provider
-            .detect_ips(&client, IpType::V4, timeout, &ppfmt)
-            .await;
+        let result = provider.detect_ips(IpType::V4, timeout, &ppfmt).await;
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|ip| ip.is_ipv4()));
     }
@@ -1405,13 +1426,10 @@ fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
                 "2001:db8::1".parse().unwrap(),
             ],
         };
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
 
-        let result = provider
-            .detect_ips(&client, IpType::V6, timeout, &ppfmt)
-            .await;
+        let result = provider.detect_ips(IpType::V6, timeout, &ppfmt).await;
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|ip| ip.is_ipv6()));
     }
@@ -1421,18 +1439,13 @@ fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
     #[tokio::test]
     async fn test_none_detect_ips_returns_empty() {
         let provider = ProviderType::None;
-        let client = crate::test_client();
         let ppfmt = PP::default_pp();
         let timeout = Duration::from_secs(5);
 
-        let result_v4 = provider
-            .detect_ips(&client, IpType::V4, timeout, &ppfmt)
-            .await;
+        let result_v4 = provider.detect_ips(IpType::V4, timeout, &ppfmt).await;
         assert!(result_v4.is_empty());
 
-        let result_v6 = provider
-            .detect_ips(&client, IpType::V6, timeout, &ppfmt)
-            .await;
+        let result_v6 = provider.detect_ips(IpType::V6, timeout, &ppfmt).await;
         assert!(result_v6.is_empty());
     }
 }

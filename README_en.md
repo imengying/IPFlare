@@ -120,7 +120,7 @@ separate working directory and service when managing a different zone.
 | `delete_on_stop` | boolean | `false` | Remove managed records and list items on shutdown |
 | `delete_on_failure` | boolean | `false` | Delete records after a definitive no-address result |
 | `ttl` | integer | `1` | DNS TTL; values below 30 use automatic TTL |
-| `proxied` | string | `false` | Expression selecting proxied domains |
+| `proxied` | boolean | `false` | Enable the Cloudflare proxy |
 | `record_comment` | string/null | `null` | Comment written to managed DNS records |
 | `managed_records_comment_regex` | string/null | `null` | Only manage DNS records whose comment matches |
 | `waf_list_item_comment` | string/null | `null` | Comment written to WAF list items |
@@ -170,17 +170,6 @@ fails. The token is stored in `config.json`, so keep the file at mode `0600`.
 Network lookup failures preserve existing records. Deterministic providers
 (`local`, `local.iface:*`, `literal:*`, and `none`) can report a definitive
 absence; `delete_on_failure` controls deletion only in that case.
-
-### Proxied expressions
-
-The `proxied` field accepts `true`, `false`, and expressions built from
-`is(example.com)`, `sub(example.com)`, `!`, `&&`, `||`, and parentheses.
-
-```json
-{
-  "proxied": "sub(web.example.com) && !is(private.web.example.com)"
-}
-```
 
 ## Usage
 

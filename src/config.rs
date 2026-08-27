@@ -22,7 +22,7 @@ pub struct AppConfig {
     pub delete_on_stop: bool,
     pub delete_on_failure: bool,
     pub ttl: Ttl,
-    pub proxied_expression: Option<domain::Predicate>,
+    pub proxied: bool,
     pub record_comment: Option<String>,
     pub managed_comment_regex: Option<regex_lite::Regex>,
     pub waf_list_item_comment: Option<String>,
@@ -92,8 +92,8 @@ struct FileConfig {
     delete_on_failure: bool,
     #[serde(default = "default_ttl")]
     ttl: i64,
-    #[serde(default = "default_proxied")]
-    proxied: String,
+    #[serde(default)]
+    proxied: bool,
     #[serde(default)]
     record_comment: Option<String>,
     #[serde(default)]
@@ -132,10 +132,6 @@ fn default_schedule() -> String {
 
 fn default_ttl() -> i64 {
     1
-}
-
-fn default_proxied() -> String {
-    "false".to_string()
 }
 
 fn default_detection_timeout() -> String {
@@ -308,9 +304,6 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
         }
     }
 
-    let proxied_expression = domain::parse_proxied_expression(file.proxied.trim())
-        .map(Some)
-        .map_err(|error| format!("Invalid proxied expression: {error}"))?;
     let record_comment = non_empty(file.record_comment);
     let managed_comment_regex = parse_regex(
         file.managed_records_comment_regex,
@@ -341,7 +334,7 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
     }
 
     Ok(AppConfig {
-        auth: Auth::Token(api_token.to_string()),
+        auth: Auth::token(api_token),
         account_id,
         zone_id,
         providers,
@@ -352,7 +345,7 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
         delete_on_stop: file.delete_on_stop,
         delete_on_failure: file.delete_on_failure,
         ttl: Ttl::new(file.ttl),
-        proxied_expression,
+        proxied: file.proxied,
         record_comment,
         managed_comment_regex,
         waf_list_item_comment,
@@ -383,7 +376,7 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
             Notifier::telegram(notifier)
         }
         Err(error) => {
-            ppfmt.errorf(&format!("Failed to setup Telegram notifications: {error}"));
+            ppfmt.warningf(&format!("Failed to setup Telegram notifications: {error}"));
             Notifier::disabled()
         }
     }
@@ -391,13 +384,13 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
 
 pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
     let inner = ppfmt.indent();
-    ppfmt.noticef("Configuration:");
+    ppfmt.infof("Configuration:");
     inner.infof(&format!("Account ID: {}", config.account_id));
     inner.infof(&format!("Zone ID: {}", config.zone_id));
 
     for ip_type in [IpType::V4, IpType::V6] {
         if let Some(domains) = config.domains.get(&ip_type) {
-            inner.noticef(&format!(
+            inner.infof(&format!(
                 "{} domains: {}",
                 ip_type.describe(),
                 domains.join(", ")
@@ -413,7 +406,7 @@ pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
     }
 
     for waf_list in &config.waf_lists {
-        inner.noticef(&format!("WAF list: {}", waf_list.describe()));
+        inner.infof(&format!("WAF list: {}", waf_list.describe()));
     }
     inner.infof(&format!("TTL: {}", config.ttl.describe()));
     inner.infof(&format!("Schedule: {}", config.update_cron.describe()));
@@ -448,7 +441,7 @@ mod tests {
     #[test]
     fn parses_minimal_config_with_defaults() {
         let config = parse_config_content(&minimal_config(""), false).unwrap();
-        assert!(matches!(config.auth, Auth::Token(ref token) if token == "test-token"));
+        assert_eq!(config.auth.0, "test-token");
         assert_eq!(config.domains[&IpType::V4], ["example.com"]);
         assert!(!config.domains.contains_key(&IpType::V6));
         assert!(

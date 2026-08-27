@@ -113,7 +113,7 @@ cp config-example.json config.json
 | `delete_on_stop` | boolean | `false` | 停止时删除受管记录和列表项 |
 | `delete_on_failure` | boolean | `false` | 明确检测到无地址时删除记录 |
 | `ttl` | integer | `1` | DNS TTL；小于 30 时使用自动 TTL |
-| `proxied` | string | `false` | 选择代理域名的表达式 |
+| `proxied` | boolean | `false` | 是否开启 Cloudflare 代理 |
 | `record_comment` | string/null | `null` | 写入受管 DNS 记录的注释 |
 | `managed_records_comment_regex` | string/null | `null` | 只管理注释匹配的 DNS 记录 |
 | `waf_list_item_comment` | string/null | `null` | 写入 WAF 列表项的注释 |
@@ -161,17 +161,6 @@ DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。Token
 网络检测失败时会保留现有记录。确定性检测方式（`local`、
 `local.iface:*`、`literal:*` 和 `none`）可以明确报告无地址；只有这种情况
 才由 `delete_on_failure` 决定是否删除记录。
-
-### 代理表达式
-
-`proxied` 支持 `true`、`false`，以及由 `is(example.com)`、
-`sub(example.com)`、`!`、`&&`、`||` 和括号组成的表达式：
-
-```json
-{
-  "proxied": "sub(web.example.com) && !is(private.web.example.com)"
-}
-```
 
 ## 使用
 

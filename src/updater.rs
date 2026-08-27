@@ -16,7 +16,7 @@ pub async fn update_once(
     cf_cache: &mut CachedCloudflareFilter,
     ppfmt: &PP,
     noop_reported: &mut HashSet<String>,
-    detection_client: &Client,
+    range_client: &Client,
 ) -> bool {
     let mut all_ok = true;
     let mut messages = Vec::new();
@@ -36,7 +36,7 @@ pub async fn update_once(
             provider.name()
         ));
         match provider
-            .detect(detection_client, *ip_type, config.detection_timeout, ppfmt)
+            .detect(*ip_type, config.detection_timeout, ppfmt)
             .await
         {
             DetectionOutcome::Ips(ips) => {
@@ -79,7 +79,7 @@ pub async fn update_once(
     // Filter out Cloudflare IPs if enabled
     if config.reject_cloudflare_ips {
         if let Some(cf_filter) = cf_cache
-            .get(detection_client, config.detection_timeout, ppfmt)
+            .get(range_client, config.detection_timeout, ppfmt)
             .await
         {
             for (ip_type, ips) in detected_ips.iter_mut() {
@@ -149,19 +149,13 @@ pub async fn update_once(
         let record_type = ip_type.record_type();
 
         for domain_str in domains {
-            let proxied = config
-                .proxied_expression
-                .as_ref()
-                .map(|f| f(domain_str))
-                .unwrap_or(false);
-
             let result = handle
                 .set_ips(
                     &config.zone_id,
                     domain_str,
                     record_type,
                     &ips,
-                    proxied,
+                    config.proxied,
                     config.ttl,
                     config.record_comment.as_deref(),
                     config.dry_run,
@@ -367,7 +361,7 @@ mod tests {
         dry_run: bool,
     ) -> AppConfig {
         AppConfig {
-            auth: Auth::Token("test-token".to_string()),
+            auth: Auth::token("test-token"),
             account_id: "account-123".to_string(),
             zone_id: "zone-abc".to_string(),
             providers,
@@ -378,7 +372,7 @@ mod tests {
             delete_on_stop: false,
             delete_on_failure: false,
             ttl: Ttl::AUTO,
-            proxied_expression: None,
+            proxied: false,
             record_comment: None,
             managed_comment_regex: None,
             waf_list_item_comment: None,
@@ -393,7 +387,7 @@ mod tests {
     }
 
     fn handle(base_url: &str) -> CloudflareHandle {
-        CloudflareHandle::with_base_url(base_url, Auth::Token("test-token".to_string()))
+        CloudflareHandle::with_base_url(base_url, Auth::token("test-token"))
     }
 
     /// JSON for an empty DNS records list.

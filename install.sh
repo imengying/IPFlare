@@ -297,7 +297,7 @@ configure() {
   "ipv6_provider": "${ipv6_provider}",
   "waf_lists": ${waf_lists_json},
   "schedule": "@every ${interval}",
-  "proxied": "${proxied}",
+  "proxied": ${proxied},
   "record_comment": "ipflare",
   "telegram": ${telegram_json}
 }

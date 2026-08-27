@@ -16,7 +16,7 @@
   "delete_on_stop": false,
   "delete_on_failure": false,
   "ttl": 1,
-  "proxied": "false",
+  "proxied": false,
   "record_comment": "ipflare",
   "managed_records_comment_regex": null,
   "waf_list_item_comment": null,
