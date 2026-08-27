@@ -47,7 +47,7 @@ pub async fn update_once(
                     ip_strs.join(", ")
                 ));
                 messages.push(Message::new_ok(&format!(
-                    "Detected {}: {}",
+                    "检测到 {}: {}",
                     ip_type.describe(),
                     ip_strs.join(", ")
                 )));
@@ -56,7 +56,7 @@ pub async fn update_once(
             DetectionOutcome::NoIp => {
                 ppfmt.warningf(&format!("No {} address detected", ip_type.describe()));
                 messages.push(Message::new_fail(&format!(
-                    "Failed to detect {} address",
+                    "未检测到 {} 地址",
                     ip_type.describe()
                 )));
             }
@@ -68,7 +68,7 @@ pub async fn update_once(
                         ),
                     );
                 messages.push(Message::new_fail(&format!(
-                    "Failed to detect {} address",
+                    "{} 检测失败，本轮跳过更新（已保留现有记录）",
                     ip_type.describe()
                 )));
                 detection_failed.insert(*ip_type);
@@ -102,7 +102,7 @@ pub async fn update_once(
                             ),
                         );
                     messages.push(Message::new_fail(&format!(
-                        "All {} addresses rejected (Cloudflare IPs)",
+                        "检测到的 {} 地址全部属于 Cloudflare IP 段，已拒绝",
                         ip_type.describe()
                     )));
                     // The real IP is unknown, not absent - preserve records.
@@ -176,13 +176,13 @@ pub async fn update_once(
                     notify = true;
                     if ips.is_empty() {
                         messages.push(Message::new_ok(&format!(
-                            "Deleted DNS records for {domain_str} (no {} address detected)",
+                            "已删除 {domain_str} 的 DNS 记录（未检测到 {} 地址）",
                             ip_type.describe()
                         )));
                     } else {
                         let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
                         messages.push(Message::new_ok(&format!(
-                            "Updated {domain_str} -> {}",
+                            "已更新 {domain_str} -> {}",
                             ip_strs.join(", ")
                         )));
                     }
@@ -191,7 +191,7 @@ pub async fn update_once(
                     noop_reported.remove(&noop_key);
                     notify = true;
                     all_ok = false;
-                    messages.push(Message::new_fail(&format!("Failed to update {domain_str}")));
+                    messages.push(Message::new_fail(&format!("更新 {domain_str} 失败")));
                 }
                 SetResult::Noop => {
                     if noop_reported.insert(noop_key) {
@@ -246,7 +246,7 @@ pub async fn update_once(
                 noop_reported.remove(&noop_key);
                 notify = true;
                 messages.push(Message::new_ok(&format!(
-                    "Updated WAF list {}",
+                    "已更新 WAF 列表 {}",
                     waf_list.describe()
                 )));
             }
@@ -255,7 +255,7 @@ pub async fn update_once(
                 notify = true;
                 all_ok = false;
                 messages.push(Message::new_fail(&format!(
-                    "Failed to update WAF list {}",
+                    "更新 WAF 列表 {} 失败",
                     waf_list.describe()
                 )));
             }
@@ -296,9 +296,9 @@ pub async fn final_delete(
                 .await;
             all_ok &= deleted;
             messages.push(if deleted {
-                Message::new_ok(&format!("Deleted records for {domain_str}"))
+                Message::new_ok(&format!("已删除 {domain_str} 的记录"))
             } else {
-                Message::new_fail(&format!("Failed to delete records for {domain_str}"))
+                Message::new_fail(&format!("删除 {domain_str} 的记录失败"))
             });
         }
     }
@@ -308,9 +308,9 @@ pub async fn final_delete(
         let cleared = handle.final_clear_waf_list(waf_list, ppfmt).await;
         all_ok &= cleared;
         messages.push(if cleared {
-            Message::new_ok(&format!("Cleared WAF list {}", waf_list.describe()))
+            Message::new_ok(&format!("已清空 WAF 列表 {}", waf_list.describe()))
         } else {
-            Message::new_fail(&format!("Failed to clear WAF list {}", waf_list.describe()))
+            Message::new_fail(&format!("清空 WAF 列表 {} 失败", waf_list.describe()))
         });
     }
 

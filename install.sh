@@ -5,6 +5,7 @@ readonly repository="imengying/IPFlare"
 readonly config_dir="/etc/ipflare"
 readonly binary_path="${config_dir}/ipflare"
 readonly config_path="${config_dir}/config.json"
+readonly version_path="${config_dir}/version"
 readonly systemd_service_name="ipflare.service"
 readonly systemd_service_path="/etc/systemd/system/${systemd_service_name}"
 readonly openrc_service_name="ipflare"
@@ -373,6 +374,45 @@ reload_service_manager() {
     fi
 }
 
+installed_version() {
+    if [ ! -x "${binary_path}" ]; then
+        printf '未安装'
+    elif [ -r "${version_path}" ]; then
+        head -n 1 "${version_path}"
+    else
+        printf '未知版本'
+    fi
+}
+
+# "运行中，开机自启" style summary, so the menu shows state without the
+# user having to remember which init system this host uses.
+service_state() {
+    state_running="已停止"
+    state_enabled="未开机自启"
+    if [ "${init_system}" = systemd ]; then
+        if [ ! -f "${systemd_service_path}" ]; then
+            printf '未安装服务'
+            return
+        fi
+        systemctl is-active --quiet "${systemd_service_name}" \
+            && state_running="运行中"
+        systemctl is-enabled --quiet "${systemd_service_name}" 2>/dev/null \
+            && state_enabled="开机自启"
+    else
+        if [ ! -f "${openrc_service_path}" ]; then
+            printf '未安装服务'
+            return
+        fi
+        rc-service "${openrc_service_name}" status >/dev/null 2>&1 \
+            && state_running="运行中"
+        rc-update show default 2>/dev/null \
+            | awk -v name="${openrc_service_name}" '$1 == name { found = 1 }
+                END { exit !found }' \
+            && state_enabled="开机自启"
+    fi
+    printf '%s，%s' "${state_running}" "${state_enabled}"
+}
+
 resolve_platform() {
     case "$(uname -m)" in
         x86_64 | amd64) platform="linux-x86_64" ;;
@@ -423,6 +463,10 @@ install_or_update() {
     [ -f "${temp_dir}/ipflare" ] || fail "发布包中没有 ipflare"
     install -d -m 0700 "${config_dir}"
     install -m 0755 "${temp_dir}/ipflare" "${binary_path}"
+    # Written next to the binary it describes, so the menu still reports the
+    # right version if configuring or starting the service fails.
+    printf '%s\n' "${tag}" >"${temp_dir}/version"
+    install -m 0644 "${temp_dir}/version" "${version_path}"
 
     if [ ! -f "${config_path}" ]; then
         configure
@@ -456,11 +500,12 @@ uninstall_ipflare() {
     ensure_tty
     if ! confirm "确认卸载 ipflare" no; then
         echo "已取消。"
-        return
+        return 1
     fi
 
     disable_and_stop_service
-    rm -f "${systemd_service_path}" "${openrc_service_path}" "${binary_path}"
+    rm -f "${systemd_service_path}" "${openrc_service_path}" "${binary_path}" \
+        "${version_path}"
     reload_service_manager
 
     if [ -f "${config_path}" ]; then
@@ -498,19 +543,44 @@ HELP
 select_action() {
     ensure_tty
     printf '\nipflare 安装管理\n' >&3
-    printf '1) 更新或重新安装\n' >&3
-    printf '2) 重新配置\n' >&3
-    printf '3) 卸载\n' >&3
-    printf '0) 退出\n' >&3
-    printf '请选择: ' >&3
-    IFS= read -r choice <&3 || fail "无法读取终端输入"
-    case "${choice}" in
-        1) action="update" ;;
-        2) action="configure" ;;
-        3) action="uninstall" ;;
-        0) action="exit" ;;
-        *) fail "无效选项: ${choice}" ;;
-    esac
+    printf '  版本: %s\n' "$(installed_version)" >&3
+    printf '  服务: %s (%s)\n' "$(service_state)" "${init_system}" >&3
+    printf '  配置: %s\n' "${config_path}" >&3
+    printf '\n' >&3
+    printf '  1) 更新或重新安装\n' >&3
+    printf '  2) 重新配置\n' >&3
+    printf '  3) 卸载\n' >&3
+    printf '  0) 退出\n' >&3
+    while true; do
+        printf '请选择 [0-3]: ' >&3
+        IFS= read -r choice <&3 || fail "无法读取终端输入"
+        case "${choice}" in
+            1) action="update" ; return ;;
+            2) action="configure" ; return ;;
+            3) action="uninstall" ; return ;;
+            0 | q | Q) action="exit" ; return ;;
+            '') ;;
+            *) printf '无效选项: %s\n' "${choice}" >&3 ;;
+        esac
+    done
+}
+
+# The menu returns after each action so several operations can be chained in
+# one run. Uninstall and explicit exit end the loop.
+menu_loop() {
+    while true; do
+        select_action
+        case "${action}" in
+            update) install_or_update ;;
+            configure) reconfigure ;;
+            uninstall)
+                if uninstall_ipflare; then
+                    return
+                fi
+                ;;
+            exit) return ;;
+        esac
+    done
 }
 
 [ "$(uname -s)" = Linux ] || fail "安装脚本仅支持 Linux"
@@ -523,23 +593,22 @@ esac
 
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 运行一键脚本"
 [ "$#" -le 1 ] || fail "只接受一个命令；运行 install.sh help 查看帮助"
-require_commands awk id install mktemp rm rmdir stty tr uname
+require_commands awk head id install mktemp rm rmdir stty tr uname
 detect_init
 
 action="${1:-}"
 if [ -z "${action}" ]; then
     if [ -x "${binary_path}" ] || [ -f "${service_path}" ]; then
-        select_action
-    else
-        action="install"
+        menu_loop
+        exit 0
     fi
+    action="install"
 fi
 
 case "${action}" in
     install | update) install_or_update ;;
     configure) reconfigure ;;
-    uninstall) uninstall_ipflare ;;
-    exit) ;;
+    uninstall) uninstall_ipflare || true ;;
     *)
         usage
         fail "未知命令: ${action}"
