@@ -181,11 +181,11 @@ pub async fn update_once(
                         )));
                     }
                 }
-                SetResult::Failed => {
+                SetResult::Failed | SetResult::ReadFailed => {
                     noop_reported.remove(&noop_key);
                     notify = true;
                     all_ok = false;
-                    messages.push(Message::new_fail(&format!("更新 {domain_str} 失败")));
+                    messages.push(dns_failure_message(domain_str, result));
                 }
                 SetResult::Noop => {
                     if noop_reported.insert(noop_key) {
@@ -244,7 +244,7 @@ pub async fn update_once(
                     waf_list.describe()
                 )));
             }
-            SetResult::Failed => {
+            SetResult::Failed | SetResult::ReadFailed => {
                 noop_reported.remove(&noop_key);
                 notify = true;
                 all_ok = false;
@@ -268,6 +268,16 @@ pub async fn update_once(
     }
 
     all_ok
+}
+
+fn dns_failure_message(domain: &str, result: SetResult) -> Message {
+    match result {
+        SetResult::ReadFailed => Message::new_fail(&format!(
+            "无法查询 {domain} 的 Cloudflare DNS 记录，本轮未执行更新"
+        )),
+        SetResult::Failed => Message::new_fail(&format!("更新 {domain} 失败")),
+        SetResult::Noop | SetResult::Updated => unreachable!("not a DNS failure"),
+    }
 }
 
 /// Delete records and WAF entries when the process stops.
@@ -330,6 +340,15 @@ mod tests {
     // -------------------------------------------------------
     // Helpers
     // -------------------------------------------------------
+
+    #[test]
+    fn dns_read_failure_message_does_not_claim_an_update_failed() {
+        let message = dns_failure_message("wap.mengying.eu.org", SetResult::ReadFailed);
+        assert_eq!(
+            message.format(),
+            "无法查询 wap.mengying.eu.org 的 Cloudflare DNS 记录，本轮未执行更新"
+        );
+    }
 
     fn pp() -> PP {
         // quiet=true suppresses output during tests

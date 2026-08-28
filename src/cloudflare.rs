@@ -497,7 +497,7 @@ impl CloudflareHandle {
             .list_records_by_name(zone_id, record_type, fqdn, ppfmt)
             .await
         else {
-            return SetResult::Failed;
+            return SetResult::ReadFailed;
         };
         let managed: Vec<&DnsRecord> = existing
             .iter()
@@ -913,6 +913,7 @@ impl CloudflareHandle {
 pub enum SetResult {
     Noop,
     Updated,
+    ReadFailed,
     Failed,
 }
 
@@ -1842,6 +1843,36 @@ mod tests {
             )
             .await;
         assert_eq!(result, SetResult::Failed);
+    }
+
+    #[tokio::test]
+    async fn set_ips_reports_read_failure_without_writing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/zones/z1/dns_records"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = handle(&server.uri())
+            .set_ips(
+                "z1",
+                "a.example.com",
+                "A",
+                &["1.2.3.4".parse().unwrap()],
+                false,
+                Ttl::AUTO,
+                None,
+                false,
+                &pp(),
+            )
+            .await;
+
+        assert_eq!(result, SetResult::ReadFailed);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, wiremock::http::Method::GET);
     }
 
     #[tokio::test]
