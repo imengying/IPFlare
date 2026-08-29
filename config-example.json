@@ -25,5 +25,6 @@
   "update_timeout": "30s",
   "reject_cloudflare_ips": true,
   "quiet": false,
+  "name": null,
   "telegram": null
 }

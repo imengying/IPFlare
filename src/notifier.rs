@@ -44,17 +44,29 @@ impl Message {
 
 pub struct Notifier {
     telegram: Option<TelegramNotifier>,
+    name: Option<String>,
 }
 
 impl Notifier {
     pub fn disabled() -> Self {
-        Self { telegram: None }
+        Self {
+            telegram: None,
+            name: None,
+        }
     }
 
     pub fn telegram(notifier: TelegramNotifier) -> Self {
         Self {
             telegram: Some(notifier),
+            name: None,
         }
+    }
+
+    /// Instance name shown at the front of the summary line, so notifications
+    /// from several instances sharing one bot can be told apart.
+    pub fn named(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
     }
 
     pub async fn send(&self, message: &Message, ppfmt: &PP) {
@@ -62,10 +74,25 @@ impl Notifier {
             return;
         }
 
-        if let Some(telegram) = &self.telegram
-            && !telegram.send(message).await
-        {
-            ppfmt.warningf("Failed to send Telegram notification");
+        if let Some(telegram) = &self.telegram {
+            let text = self.render(message);
+            if !telegram.send_text(&text).await {
+                ppfmt.warningf("Failed to send Telegram notification");
+            }
+        }
+    }
+
+    /// The first line summarizes the outcome (`Message::ok`) so it is readable
+    /// in the notification tray; the per-target lines follow.
+    fn render(&self, message: &Message) -> String {
+        let status = if message.ok {
+            "更新成功"
+        } else {
+            "更新失败"
+        };
+        match &self.name {
+            Some(name) => format!("【{name}】ipflare {status}\n{}", message.format()),
+            None => format!("ipflare {status}\n{}", message.format()),
         }
     }
 }
@@ -82,7 +109,11 @@ impl TelegramNotifier {
         Self::with_api_base(bot_token, chat_id, "https://api.telegram.org")
     }
 
-    fn with_api_base(bot_token: &str, chat_id: &str, api_base: &str) -> Result<Self, String> {
+    pub(crate) fn with_api_base(
+        bot_token: &str,
+        chat_id: &str,
+        api_base: &str,
+    ) -> Result<Self, String> {
         let client_builder = Client::builder().timeout(Duration::from_secs(10));
         #[cfg(test)]
         let client_builder = client_builder.no_proxy();
@@ -98,13 +129,13 @@ impl TelegramNotifier {
         })
     }
 
-    async fn send(&self, message: &Message) -> bool {
+    async fn send_text(&self, text: &str) -> bool {
         let url = format!("{}/bot{}/sendMessage", self.api_base, self.bot_token);
         self.client
             .post(url)
             .json(&serde_json::json!({
                 "chat_id": self.chat_id,
-                "text": message.format()
+                "text": text
             }))
             .send()
             .await
@@ -155,7 +186,7 @@ mod tests {
         let notifier =
             TelegramNotifier::with_api_base("test-token", "-100123", &server.uri()).unwrap();
 
-        assert!(notifier.send(&Message::new_ok("updated example.com")).await);
+        assert!(notifier.send_text("updated example.com").await);
     }
 
     #[tokio::test]
@@ -171,6 +202,30 @@ mod tests {
 
         let notifier = TelegramNotifier::with_api_base("test-token", "123", &server.uri()).unwrap();
 
-        assert!(!notifier.send(&Message::new_fail("failed")).await);
+        assert!(!notifier.send_text("failed").await);
+    }
+
+    #[tokio::test]
+    async fn prefixes_summary_with_instance_name() {
+        crate::init_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token/sendMessage"))
+            .and(body_partial_json(serde_json::json!({
+                "text": "【home】ipflare 更新成功\nupdated example.com"
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let notifier = Notifier::telegram(
+            TelegramNotifier::with_api_base("test-token", "-100123", &server.uri()).unwrap(),
+        )
+        .named(Some("home".to_string()));
+
+        notifier
+            .send(&Message::new_ok("updated example.com"), &PP::new(true))
+            .await;
     }
 }

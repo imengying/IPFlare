@@ -10,7 +10,8 @@ WAF IP 列表。
 - IPv4、IPv6 独立检测和更新，可分别启用或关闭
 - 单个 Cloudflare Zone 下支持多个域名、通配符记录和 IDN 域名
 - 同步 Cloudflare WAF IP 列表
-- 支持代理规则表达式和受管记录注释过滤
+- 可选开启 Cloudflare 代理
+- 通过注释标记并筛选受管的 DNS 记录和 WAF 列表项
 - 可选 Telegram 通知
 - 支持定时运行和单次运行
 - 支持预演模式和退出时清理
@@ -33,6 +34,14 @@ WAF IP 列表。
 ```sh
 curl -fsSL https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | sudo sh
 ```
+
+没有 `curl` 时使用 `wget`：
+
+```sh
+wget -qO- https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | sudo sh
+```
+
+已以 root 身份运行时省略 `sudo`。
 
 必要配置只会询问：
 
@@ -68,8 +77,8 @@ cargo build --release --locked
 
 ## 配置
 
-程序只读取当前工作目录中的 `config.json`。
-可以从仓库示例开始：
+程序只读取当前工作目录中的 `config.json`，不支持环境变量和旧版配置格式，
+遇到未知字段会直接报错。可以从仓库示例开始：
 
 ```bash
 cp config-example.json config.json
@@ -86,7 +95,7 @@ cp config-example.json config.json
 }
 ```
 
-项目使用当前 Cloudflare API Token 鉴权，通过
+程序使用 Cloudflare API Token 鉴权，通过
 `Authorization: Bearer <API_TOKEN>` 发送令牌。不支持 Global API Key 或
 邮箱/API Key 鉴权。Token 至少需要所选 Zone 的 `Zone / DNS / Edit` 权限；
 同步 WAF 时还需要所选 Account 的 `Account / Account Filter Lists / Edit`
@@ -122,6 +131,7 @@ cp config-example.json config.json
 | `update_timeout` | string | `30s` | Cloudflare API 请求超时 |
 | `reject_cloudflare_ips` | boolean | `true` | 拒绝 Cloudflare 官方网段中的地址 |
 | `quiet` | boolean | `false` | 隐藏普通信息 |
+| `name` | string/null | `null` | 实例名称，作为通知首行的前缀 |
 | `telegram` | object/null | `null` | Telegram Bot API 配置 |
 
 至少需要配置一个域名字段或一个 `waf_lists` 条目。时长支持秒（`30s`）、
@@ -141,7 +151,11 @@ Telegram 是唯一支持的通知方式：
 }
 ```
 
-DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。Token 直接保存在
+DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。通知首行是结果摘要
+（`ipflare 更新成功` 或 `ipflare 更新失败`），配置 `name` 后形如
+`【名称】ipflare 更新成功`；失败的通知会附带 Cloudflare 返回的错误详情。
+某个地址族首次检测失败和随后恢复时也会各推送一条，中间的失败周期保持
+静默。`--dry-run` 只输出到控制台，不发送通知。Token 直接保存在
 `config.json` 中，请保持文件权限为 `0600`。
 
 ### IP 检测方式
@@ -175,6 +189,9 @@ DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。Token
 ```bash
 ./ipflare --dry-run
 ```
+
+除 `--dry-run` 外不支持其他命令行参数。服务的启动、停止和状态查看直接
+使用 systemd 或 OpenRC。
 
 ## systemd
 
@@ -233,6 +250,12 @@ rc-service ipflare stop
 rc-service ipflare restart
 rc-service ipflare status
 ```
+
+## 发布
+
+推送版本标签（例如 `v2.2.0`）会触发发布工作流：把标签版本写回
+`Cargo.toml`，运行测试，构建各平台二进制并发布 GitHub Release。
+Release 说明取自上一个标签以来的提交标题。
 
 ## 许可证
 

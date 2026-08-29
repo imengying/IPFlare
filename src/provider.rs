@@ -5,7 +5,6 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
-/// IP type: IPv4 or IPv6
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IpType {
     V4,
@@ -28,7 +27,6 @@ impl IpType {
     }
 }
 
-/// All supported provider types
 #[derive(Debug, Clone)]
 pub enum ProviderType {
     CloudflareTrace,
@@ -86,7 +84,6 @@ impl ProviderType {
             });
         }
         if let Some(url) = input.strip_prefix("url:") {
-            // Validate URL
             match reqwest::Url::parse(url) {
                 Ok(parsed) => {
                     if parsed.scheme() != "http" && parsed.scheme() != "https" {
@@ -265,13 +262,9 @@ pub fn build_split_client(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Cli
     }
 }
 
-/// Builds its own client rather than taking the shared one: the trace endpoint
-/// reports whichever family the connection used, so the address family has to
-/// be pinned at the DNS layer.
 async fn detect_cloudflare_trace(ip_type: IpType, timeout: Duration, ppfmt: &PP) -> Vec<IpAddr> {
     let client = build_split_client(ip_type, timeout, ppfmt);
 
-    // Try primary (cloudflare.com — the CDN trace endpoint)
     if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_PRIMARY, timeout).await
         && validate_detected_ip(&ip, ip_type, ppfmt)
     {
@@ -282,7 +275,6 @@ async fn detect_cloudflare_trace(ip_type: IpType, timeout: Duration, ppfmt: &PP)
         ip_type.describe()
     ));
 
-    // Try fallback (hostname-based — works when literal IPs are intercepted by WARP/Zero Trust)
     if let Some(ip) = fetch_trace_ip(&client, CF_TRACE_FALLBACK, timeout).await
         && validate_detected_ip(&ip, ip_type, ppfmt)
     {
@@ -304,7 +296,6 @@ async fn detect_cloudflare_doh(ip_type: IpType, timeout: Duration, ppfmt: &PP) -
     // connection has to be pinned to the family being detected.
     let client = build_split_client(ip_type, timeout, ppfmt);
 
-    // Construct a DNS query for whoami.cloudflare. TXT CH
     let query = build_dns_query(b"\x06whoami\x0Acloudflare\x00", 16, 3); // TXT=16, CH=3
 
     let resp = client
@@ -992,9 +983,7 @@ mod tests {
 
     #[test]
     fn test_trace_urls() {
-        // Primary uses cloudflare.com CDN endpoint (not DNS resolver IPs).
         assert_eq!(CF_TRACE_PRIMARY, "https://cloudflare.com/cdn-cgi/trace");
-        // Fallback uses api.cloudflare.com for when cloudflare.com is intercepted (WARP/Zero Trust).
         assert_eq!(
             CF_TRACE_FALLBACK,
             "https://api.cloudflare.com/cdn-cgi/trace"
@@ -1038,7 +1027,6 @@ mod tests {
     #[test]
     fn test_build_split_client_v4() {
         let client = build_split_client(IpType::V4, Duration::from_secs(5), &PP::default_pp());
-        // Client should build successfully with filtered resolver.
         drop(client);
     }
 
@@ -1308,8 +1296,6 @@ mod tests {
         }
     }
 
-    // ---- matches_ip_type ----
-
     // ---- filter_ips_by_type ----
 
     #[test]
@@ -1372,8 +1358,6 @@ fdaa149d3b9900000000000000000001 0a 40 00 82 br-990e55930a86
             ]
         );
     }
-
-    // ---- ProviderType::name ----
 
     // ---- ProviderType::parse error cases ----
 

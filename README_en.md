@@ -10,7 +10,8 @@ when the public IP address changes.
 - IPv4 and IPv6 with independent detection providers
 - Multiple domains in one Cloudflare zone, wildcard records, and IDN domains
 - Cloudflare WAF IP list synchronization
-- Proxied-record expressions and managed-record comment filters
+- Optional Cloudflare proxying
+- Comment markers to scope which DNS records and WAF list items are managed
 - Optional Telegram notifications
 - One-shot or interval-based execution
 - Dry-run mode and graceful shutdown cleanup
@@ -129,6 +130,7 @@ separate working directory and service when managing a different zone.
 | `update_timeout` | string | `30s` | Cloudflare API timeout |
 | `reject_cloudflare_ips` | boolean | `true` | Reject addresses in Cloudflare's published ranges |
 | `quiet` | boolean | `false` | Suppress informational output |
+| `name` | string/null | `null` | Instance name prefixed to the notification summary line |
 | `telegram` | object/null | `null` | Telegram Bot API credentials |
 
 At least one domain field or `waf_lists` entry is required. Durations accept
@@ -151,7 +153,12 @@ target chat ID directly:
 ```
 
 Notifications are sent when records or WAF lists change, or when an update
-fails. The token is stored in `config.json`, so keep the file at mode `0600`.
+fails. The first line summarizes the outcome; setting `name` prefixes it with
+the instance name. Failed updates include the error detail returned by
+Cloudflare. The first failed IP lookup for an address family and its recovery
+each send one notification, and the cycles in between stay silent. `--dry-run`
+prints to the console only and sends nothing. The token is stored in
+`config.json`, so keep the file at mode `0600`.
 
 ### IP providers
 

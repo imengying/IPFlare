@@ -13,7 +13,6 @@ use crate::notifier::Notifier;
 use crate::pp::PP;
 use rand::RngExt;
 use reqwest::Client;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
@@ -90,8 +89,12 @@ async fn main() {
     .await;
 
     if app_config.delete_on_stop {
-        ppfmt.infof("Deleting records on stop...");
-        success &= updater::final_delete(&app_config, &handle, &notifier, &ppfmt).await;
+        if app_config.dry_run {
+            ppfmt.infof("[DRY RUN] Would delete records on stop.");
+        } else {
+            ppfmt.infof("Deleting records on stop...");
+            success &= updater::final_delete(&app_config, &handle, &notifier, &ppfmt).await;
+        }
     }
     if !success {
         std::process::exit(1);
@@ -132,7 +135,7 @@ async fn run_schedule(
     cf_cache: &mut cf_ip_filter::CachedCloudflareFilter,
     range_client: &Client,
 ) -> bool {
-    let mut noop_reported = HashSet::new();
+    let mut state = updater::CycleState::default();
 
     if matches!(config.update_cron, CronSchedule::Once) {
         return updater::update_once(
@@ -141,7 +144,7 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut noop_reported,
+            &mut state,
             range_client,
         )
         .await;
@@ -163,15 +166,13 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut noop_reported,
+            &mut state,
             range_client,
         )
         .await;
     }
 
     while running.load(Ordering::SeqCst) {
-        // Spread the wait around the configured interval rather than always
-        // after it, so the average cycle matches what the user configured.
         let max_jitter = jitter_bound(interval.as_secs());
         let random_value = if max_jitter > 0 {
             rand::rng().random_range(0..=(max_jitter * 2))
@@ -191,7 +192,7 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut noop_reported,
+            &mut state,
             range_client,
         )
         .await;

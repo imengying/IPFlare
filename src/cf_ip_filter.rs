@@ -49,7 +49,6 @@ impl CidrRange {
     }
 }
 
-/// Holds parsed Cloudflare CIDR ranges for IP filtering.
 pub struct CloudflareIpFilter {
     ranges: Vec<CidrRange>,
 }
@@ -140,13 +139,11 @@ impl CloudflareIpFilter {
         }
     }
 
-    /// Check if an IP address falls within any Cloudflare range.
     pub fn contains(&self, ip: &IpAddr) -> bool {
         self.ranges.iter().any(|net| net.contains(ip))
     }
 }
 
-/// Refresh interval for Cloudflare IP ranges (24 hours).
 const CF_RANGE_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Cached wrapper around [`CloudflareIpFilter`].

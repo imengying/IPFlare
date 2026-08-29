@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub reject_cloudflare_ips: bool,
     pub dry_run: bool,
     pub quiet: bool,
+    pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
 }
 
@@ -110,6 +111,8 @@ struct FileConfig {
     reject_cloudflare_ips: bool,
     #[serde(default)]
     quiet: bool,
+    #[serde(default)]
+    name: Option<String>,
     #[serde(default)]
     telegram: Option<TelegramConfig>,
 }
@@ -355,6 +358,7 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
         reject_cloudflare_ips: file.reject_cloudflare_ips,
         dry_run,
         quiet: file.quiet,
+        name: non_empty(file.name),
         telegram: parse_telegram(file.telegram)?,
     })
 }
@@ -373,7 +377,7 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
     match TelegramNotifier::new(&telegram.bot_token, &telegram.chat_id) {
         Ok(notifier) => {
             ppfmt.infof("Notifications: Telegram");
-            Notifier::telegram(notifier)
+            Notifier::telegram(notifier).named(config.name.clone())
         }
         Err(error) => {
             ppfmt.warningf(&format!("Failed to setup Telegram notifications: {error}"));
@@ -385,6 +389,9 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
 pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
     let inner = ppfmt.indent();
     ppfmt.infof("Configuration:");
+    if let Some(name) = &config.name {
+        inner.infof(&format!("Instance name: {name}"));
+    }
     inner.infof(&format!("Account ID: {}", config.account_id));
     inner.infof(&format!("Zone ID: {}", config.zone_id));
 
@@ -517,6 +524,14 @@ mod tests {
         assert!(config.domains.contains_key(&IpType::V4));
         assert!(!config.domains.contains_key(&IpType::V6));
         assert!(!config.providers.contains_key(&IpType::V6));
+    }
+
+    #[test]
+    fn parses_instance_name() {
+        let config = parse_config_content(&minimal_config(r#""name": " home ","#), false).unwrap();
+        assert_eq!(config.name.as_deref(), Some("home"));
+        let config = parse_config_content(&minimal_config(""), false).unwrap();
+        assert_eq!(config.name, None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::pp::PP;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -229,6 +230,9 @@ pub struct CloudflareHandle {
     operation_timeout: Duration,
     managed_comment_regex: Option<regex_lite::Regex>,
     managed_waf_comment_regex: Option<regex_lite::Regex>,
+    /// Reason for the most recent failed API interaction, so callers can
+    /// include it in notifications. Sequential single-task use only.
+    last_error: RefCell<Option<String>>,
 }
 
 impl CloudflareHandle {
@@ -250,6 +254,7 @@ impl CloudflareHandle {
             operation_timeout: update_timeout,
             managed_comment_regex,
             managed_waf_comment_regex,
+            last_error: RefCell::new(None),
         }
     }
 
@@ -269,7 +274,19 @@ impl CloudflareHandle {
             operation_timeout: Duration::from_secs(10),
             managed_comment_regex: None,
             managed_waf_comment_regex: None,
+            last_error: RefCell::new(None),
         }
+    }
+
+    /// Best-effort reason for the most recent failed API interaction, for
+    /// including in notifications. Each failure overwrites it; reading it
+    /// consumes it.
+    pub fn take_last_error(&self) -> Option<String> {
+        self.last_error.borrow_mut().take()
+    }
+
+    fn record_last_error(&self, detail: String) {
+        *self.last_error.borrow_mut() = Some(detail);
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -305,14 +322,10 @@ impl CloudflareHandle {
                 if resp.status().is_success() {
                     match resp.json::<T>().await {
                         Ok(value) => {
-                            // Cloudflare signals application-level failures with
-                            // HTTP 200 and success: false; the reason is only in
-                            // the errors array.
                             if value.is_failure() {
-                                ppfmt.warningf(&format!(
-                                    "API {method} '{url}' failed: {}",
-                                    value.error_summary()
-                                ));
+                                let summary = value.error_summary();
+                                self.record_last_error(summary.clone());
+                                ppfmt.warningf(&format!("API {method} '{url}' failed: {summary}"));
                             }
                             Some(value)
                         }
@@ -320,6 +333,7 @@ impl CloudflareHandle {
                             ppfmt.warningf(&format!(
                                 "API {method} '{url}' returned invalid JSON: {error}"
                             ));
+                            self.record_last_error(format!("invalid JSON response: {error}"));
                             None
                         }
                     }
@@ -342,11 +356,13 @@ impl CloudflareHandle {
                     ppfmt.warningf(&format!(
                         "API {method} '{url_str}' failed: HTTP {status}: {detail}"
                     ));
+                    self.record_last_error(format!("HTTP {status}: {detail}"));
                     None
                 }
             }
             Err(e) => {
                 ppfmt.warningf(&format!("API {method} '{url}' error: {e}"));
+                self.record_last_error(e.to_string());
                 None
             }
         }
@@ -503,9 +519,9 @@ impl CloudflareHandle {
             .iter()
             .filter(|r| self.is_managed_record(r))
             .collect();
+        let previous: Vec<String> = managed.iter().map(|r| r.content.clone()).collect();
 
         if ips.is_empty() {
-            // Delete all managed records
             if managed.is_empty() {
                 return SetResult::Noop;
             }
@@ -522,13 +538,12 @@ impl CloudflareHandle {
                 }
             }
             return if success {
-                SetResult::Updated
+                SetResult::Updated(previous)
             } else {
                 SetResult::Failed
             };
         }
 
-        // For each IP, find or create a record
         let mut used_record_ids = Vec::new();
         let mut any_change = false;
         let mut success = true;
@@ -536,14 +551,12 @@ impl CloudflareHandle {
         for ip in ips {
             let ip_str = ip.to_string();
 
-            // Find existing record with this IP
             let matching = managed
                 .iter()
                 .find(|r| r.content == ip_str && !used_record_ids.contains(&&r.id));
 
             if let Some(record) = matching {
                 used_record_ids.push(&record.id);
-                // Check if update needed (proxied or Ttl changed)
                 let needs_update = record.proxied != Some(proxied)
                     || (ttl != Ttl::AUTO && record.ttl != Some(ttl.seconds()))
                     || (comment.is_some() && record.comment.as_deref() != comment);
@@ -571,7 +584,6 @@ impl CloudflareHandle {
                     // Caller handles "up to date" logging based on SetResult::Noop
                 }
             } else {
-                // Find an existing managed record to update, or create new
                 let reusable = managed.iter().find(|r| !used_record_ids.contains(&&r.id));
 
                 let payload = DnsRecordPayload {
@@ -609,7 +621,6 @@ impl CloudflareHandle {
             }
         }
 
-        // Delete extra managed records (duplicates)
         for record in &managed {
             if !used_record_ids.contains(&&record.id) {
                 any_change = true;
@@ -631,7 +642,7 @@ impl CloudflareHandle {
         if !success {
             SetResult::Failed
         } else if any_change {
-            SetResult::Updated
+            SetResult::Updated(previous)
         } else {
             SetResult::Noop
         }
@@ -761,10 +772,11 @@ impl CloudflareHandle {
             match status.status.as_str() {
                 "completed" => return true,
                 "failed" => {
+                    let detail = status.error.as_deref().unwrap_or("unknown error");
                     ppfmt.warningf(&format!(
-                        "WAF list operation {operation_id} failed: {}",
-                        status.error.as_deref().unwrap_or("unknown error")
+                        "WAF list operation {operation_id} failed: {detail}"
                     ));
+                    self.record_last_error(format!("bulk operation failed: {detail}"));
                     return false;
                 }
                 "pending" | "running" if Instant::now() < deadline => {
@@ -772,12 +784,14 @@ impl CloudflareHandle {
                 }
                 "pending" | "running" => {
                     ppfmt.warningf(&format!("WAF list operation {operation_id} timed out"));
+                    self.record_last_error("bulk operation timed out".to_string());
                     return false;
                 }
                 other => {
                     ppfmt.warningf(&format!(
                         "WAF list operation {operation_id} returned status '{other}'"
                     ));
+                    self.record_last_error(format!("bulk operation returned status '{other}'"));
                     return false;
                 }
             }
@@ -796,7 +810,9 @@ impl CloudflareHandle {
         let list_meta = match self.find_waf_list(waf_list, ppfmt).await {
             Some(meta) => meta,
             None => {
-                ppfmt.warningf(&format!("WAF list {} not found", waf_list.describe()));
+                let detail = format!("WAF list {} not found", waf_list.describe());
+                ppfmt.warningf(&detail);
+                self.record_last_error(detail);
                 return SetResult::Failed;
             }
         };
@@ -808,7 +824,6 @@ impl CloudflareHandle {
             return SetResult::Failed;
         };
 
-        // Filter to managed items
         let managed_items: Vec<&WAFListItem> = existing_items
             .iter()
             .filter(|item| match &self.managed_waf_comment_regex {
@@ -818,6 +833,10 @@ impl CloudflareHandle {
                 }
                 None => true,
             })
+            .collect();
+        let previous: Vec<String> = managed_items
+            .iter()
+            .filter_map(|item| item.ip.clone())
             .collect();
 
         let desired_ips: HashSet<String> = ips.iter().map(|ip| ip.to_string()).collect();
@@ -854,7 +873,7 @@ impl CloudflareHandle {
                     waf_list.describe()
                 ));
             }
-            return SetResult::Updated;
+            return SetResult::Updated(previous);
         }
 
         for ip in &ips_to_remove {
@@ -894,7 +913,7 @@ impl CloudflareHandle {
             .replace_waf_list_items(&waf_list.account_id, &list_meta.id, &target, ppfmt)
             .await
         {
-            SetResult::Updated
+            SetResult::Updated(previous)
         } else {
             SetResult::Failed
         }
@@ -909,10 +928,12 @@ impl CloudflareHandle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetResult {
     Noop,
-    Updated,
+    /// The managed addresses changed. Carries the managed addresses as they
+    /// were before the update, for old -> new reporting in notifications.
+    Updated(Vec<String>),
     ReadFailed,
     Failed,
 }
@@ -1049,6 +1070,29 @@ mod tests {
         assert!(cf.list_records("zone-1", "A", &pp()).await.is_none());
     }
 
+    /// A failed API call records its reason for the notification layer, and
+    /// reading consumes it.
+    #[tokio::test]
+    async fn failed_api_request_records_error_detail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/zones/zone-1/dns_records"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "success": false,
+                "errors": [{ "code": 9109, "message": "Invalid access token" }]
+            })))
+            .mount(&server)
+            .await;
+
+        let cf = handle(&server.uri());
+        assert!(cf.list_records("zone-1", "A", &pp()).await.is_none());
+        assert_eq!(
+            cf.take_last_error().as_deref(),
+            Some("HTTP 403 Forbidden: Invalid access token (code 9109)")
+        );
+        assert_eq!(cf.take_last_error(), None);
+    }
+
     fn handle(base_url: &str) -> CloudflareHandle {
         CloudflareHandle::with_base_url(base_url, test_auth())
     }
@@ -1067,6 +1111,7 @@ mod tests {
             operation_timeout: Duration::from_secs(10),
             managed_comment_regex: Some(regex_lite::Regex::new(pattern).unwrap()),
             managed_waf_comment_regex: None,
+            last_error: RefCell::new(None),
         }
     }
 
@@ -1094,14 +1139,6 @@ mod tests {
             .mount(server)
             .await;
     }
-
-    // -------------------------------------------------------
-    // Ttl tests
-    // -------------------------------------------------------
-
-    // -------------------------------------------------------
-    // Auth tests
-    // -------------------------------------------------------
 
     // -------------------------------------------------------
     // WAFList tests
@@ -1360,7 +1397,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_ips: matching existing record -> noop ---
@@ -1444,7 +1481,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(previous) if previous == ["9.9.9.9"]));
     }
 
     // --- set_ips: extra records -> deletes extras ---
@@ -1486,7 +1523,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_ips: empty ips -> deletes all managed ---
@@ -1530,7 +1567,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_ips: dry_run doesn't mutate ---
@@ -1560,10 +1597,8 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
-
-    // --- is_managed_record ---
 
     // --- final_delete ---
 
@@ -1682,12 +1717,8 @@ mod tests {
         let result = h
             .set_waf_list(&wl, &ips, Some("ipflare"), false, &pp())
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
-
-    // --- CloudflareHandle::new ---
-
-    // --- API error paths ---
 
     // --- set_ips: update due to proxied change ---
 
@@ -1740,7 +1771,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_ips: dry_run with existing records ---
@@ -1776,7 +1807,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_ips: empty ips, no managed records -> noop ---
@@ -1942,7 +1973,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- set_waf_list: not found -> Failed ---
@@ -2028,7 +2059,7 @@ mod tests {
         // New IP to add + existing to remove
         let ips: Vec<IpAddr> = vec!["10.0.0.2".parse().unwrap()];
         let result = h.set_waf_list(&wl, &ips, None, true, &pp()).await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     // --- final_clear_waf_list ---
@@ -2113,7 +2144,7 @@ mod tests {
         };
         let ips: Vec<IpAddr> = vec![]; // no desired IPs -> should delete the existing one
         let result = h.set_waf_list(&wl, &ips, None, false, &pp()).await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     #[tokio::test]
@@ -2147,7 +2178,7 @@ mod tests {
                 &pp(),
             )
             .await;
-        assert_eq!(result, SetResult::Updated);
+        assert!(matches!(result, SetResult::Updated(_)));
     }
 
     #[tokio::test]
