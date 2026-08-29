@@ -192,7 +192,8 @@ Preview changes without modifying Cloudflare resources:
 ./ipflare --dry-run
 ```
 
-No other command-line flags are supported. Use systemd or OpenRC directly to
+`--version` prints the version and exits; besides that and `--dry-run`, no
+other command-line flags are supported. Use systemd or OpenRC directly to
 start, stop, restart, and inspect the service.
 
 ## systemd

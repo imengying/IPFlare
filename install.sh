@@ -5,7 +5,6 @@ readonly repository="imengying/IPFlare"
 readonly config_dir="/etc/ipflare"
 readonly binary_path="${config_dir}/ipflare"
 readonly config_path="${config_dir}/config.json"
-readonly version_path="${config_dir}/version"
 readonly systemd_service_name="ipflare.service"
 readonly systemd_service_path="/etc/systemd/system/${systemd_service_name}"
 readonly openrc_service_name="ipflare"
@@ -374,14 +373,18 @@ reload_service_manager() {
     fi
 }
 
-installed_version() {
+# Query the installed binary for its version, so the menu stays correct
+# without a separate version file on disk.
+binary_version() {
     if [ ! -x "${binary_path}" ]; then
         printf '未安装'
-    elif [ -r "${version_path}" ]; then
-        head -n 1 "${version_path}"
-    else
-        printf '未知版本'
+        return
     fi
+    version_output="$("${binary_path}" --version 2>/dev/null | head -n 1)"
+    case "${version_output}" in
+        "ipflare "*) printf '%s' "${version_output#ipflare }" ;;
+        *) printf '未知版本' ;;
+    esac
 }
 
 # "运行中，开机自启" style summary, so the menu shows state without the
@@ -463,10 +466,6 @@ install_or_update() {
     [ -f "${temp_dir}/ipflare" ] || fail "发布包中没有 ipflare"
     install -d -m 0700 "${config_dir}"
     install -m 0755 "${temp_dir}/ipflare" "${binary_path}"
-    # Written next to the binary it describes, so the menu still reports the
-    # right version if configuring or starting the service fails.
-    printf '%s\n' "${tag}" >"${temp_dir}/version"
-    install -m 0644 "${temp_dir}/version" "${version_path}"
 
     if [ ! -f "${config_path}" ]; then
         configure
@@ -504,8 +503,7 @@ uninstall_ipflare() {
     fi
 
     disable_and_stop_service
-    rm -f "${systemd_service_path}" "${openrc_service_path}" "${binary_path}" \
-        "${version_path}"
+    rm -f "${systemd_service_path}" "${openrc_service_path}" "${binary_path}"
     reload_service_manager
 
     if [ -f "${config_path}" ]; then
@@ -543,7 +541,7 @@ HELP
 select_action() {
     ensure_tty
     printf '\nipflare 安装管理\n' >&3
-    printf '  版本: %s\n' "$(installed_version)" >&3
+    printf '  版本: %s\n' "$(binary_version)" >&3
     printf '  服务: %s (%s)\n' "$(service_state)" "${init_system}" >&3
     printf '  配置: %s\n' "${config_path}" >&3
     printf '\n' >&3

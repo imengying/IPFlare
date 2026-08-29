@@ -190,8 +190,8 @@ DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。通�
 ./ipflare --dry-run
 ```
 
-除 `--dry-run` 外不支持其他命令行参数。服务的启动、停止和状态查看直接
-使用 systemd 或 OpenRC。
+命令行仅支持 `--dry-run` 和 `--version`（打印版本号后退出）。服务的启动、
+停止和状态查看直接使用 systemd 或 OpenRC。
 
 ## systemd
 

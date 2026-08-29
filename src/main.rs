@@ -27,6 +27,10 @@ async fn main() {
         .expect("Failed to install rustls crypto provider");
 
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|argument| argument == "--version") {
+        println!("ipflare v{VERSION}");
+        return;
+    }
     let unknown: Vec<&str> = args
         .iter()
         .filter(|argument| argument.as_str() != "--dry-run")
