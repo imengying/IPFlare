@@ -8,18 +8,6 @@ use reqwest::Client;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
-/// State carried across update cycles so repeated conditions are not
-/// reported every cycle.
-#[derive(Default)]
-pub struct CycleState {
-    /// Targets whose "up to date" status has been reported; cleared when the
-    /// target changes so the status is reported again.
-    pub noop_reported: HashSet<String>,
-    /// Address families whose latest cycle had no usable IP. Notifications
-    /// fire when a family enters or leaves this state, not on every cycle.
-    pub degraded: HashSet<IpType>,
-}
-
 /// Run a single update cycle.
 pub async fn update_once(
     config: &AppConfig,
@@ -27,7 +15,7 @@ pub async fn update_once(
     notifier: &Notifier,
     cf_cache: &mut CachedCloudflareFilter,
     ppfmt: &PP,
-    state: &mut CycleState,
+    noop_reported: &mut HashSet<String>,
     range_client: &Client,
 ) -> bool {
     let mut all_ok = true;
@@ -62,10 +50,6 @@ pub async fn update_once(
             }
             DetectionOutcome::NoIp => {
                 ppfmt.warningf(&format!("No {} address detected", ip_type.describe()));
-                messages.push(Message::new_fail(&format!(
-                    "未检测到 {} 地址",
-                    ip_type.describe()
-                )));
             }
             DetectionOutcome::Failed => {
                 ppfmt.warningf(&format!(
@@ -74,10 +58,6 @@ pub async fn update_once(
                             ip_type.describe()
                         ),
                     );
-                messages.push(Message::new_fail(&format!(
-                    "{} 检测失败，本轮跳过更新（已保留现有记录）",
-                    ip_type.describe()
-                )));
                 detection_failed.insert(*ip_type);
             }
         }
@@ -107,10 +87,6 @@ pub async fn update_once(
                                 ip_type.describe()
                             ),
                         );
-                    messages.push(Message::new_fail(&format!(
-                        "检测到的 {} 地址全部属于 Cloudflare IP 段，已拒绝",
-                        ip_type.describe()
-                    )));
                     // The real IP is unknown, not absent - preserve records.
                     detection_failed.insert(*ip_type);
                 }
@@ -118,44 +94,17 @@ pub async fn update_once(
         } else if !detected_ips.is_empty() {
             ppfmt.warningf("Could not fetch Cloudflare IP ranges; skipping update to avoid writing Cloudflare IPs",
                 );
-            messages.push(Message::new_fail(
-                "无法获取 Cloudflare IP 段列表，本轮跳过更新（已保留现有记录）",
-            ));
             detection_failed.extend(detected_ips.keys().copied());
             detected_ips.clear();
         }
     }
 
     // A family without a usable IP this cycle is degraded: its records are
-    // preserved and WAF updates are skipped. Notify when a family enters or
-    // leaves that state instead of on every cycle.
-    let now_degraded: HashSet<IpType> = config
+    // preserved and WAF updates are skipped this cycle.
+    let any_degraded = config
         .providers
         .keys()
-        .copied()
-        .filter(|ip_type| detected_ips.get(ip_type).is_none_or(|ips| ips.is_empty()))
-        .collect();
-    let recovered: Vec<IpType> = state.degraded.difference(&now_degraded).copied().collect();
-    let any_degraded = !now_degraded.is_empty();
-    if now_degraded
-        .iter()
-        .any(|ip_type| !state.degraded.contains(ip_type))
-    {
-        // The matching failure message was pushed during detection above.
-        notify = true;
-    }
-    for ip_type in recovered {
-        if let Some(ips) = detected_ips.get(&ip_type) {
-            let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
-            messages.push(Message::new_ok(&format!(
-                "{} 检测已恢复: {}",
-                ip_type.describe(),
-                ip_strs.join(", ")
-            )));
-            notify = true;
-        }
-    }
-    state.degraded = now_degraded;
+        .any(|ip_type| detected_ips.get(ip_type).is_none_or(|ips| ips.is_empty()));
 
     for (ip_type, domains) in &config.domains {
         let ips = detected_ips.get(ip_type).cloned().unwrap_or_default();
@@ -205,7 +154,7 @@ pub async fn update_once(
             let noop_key = format!("{domain_str}:{record_type}");
             match result {
                 SetResult::Updated(previous) => {
-                    state.noop_reported.remove(&noop_key);
+                    noop_reported.remove(&noop_key);
                     notify = true;
                     if ips.is_empty() {
                         let reason = format!("未检测到 {} 地址", ip_type.describe());
@@ -217,22 +166,22 @@ pub async fn update_once(
                                 previous.join(", ")
                             )
                         };
-                        messages.push(Message::new_ok(&text));
+                        messages.push(Message::new(&text));
                     } else {
                         let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
-                        messages.push(Message::new_ok(&set_change_message(
+                        messages.push(Message::new(&set_change_message(
                             domain_str, &previous, &ip_strs,
                         )));
                     }
                 }
                 SetResult::Failed | SetResult::ReadFailed => {
-                    state.noop_reported.remove(&noop_key);
-                    notify = true;
+                    // Operational problems stay in the logs; the exit code is
+                    // the only failure signal.
+                    noop_reported.remove(&noop_key);
                     all_ok = false;
-                    messages.push(dns_failure_message(handle, domain_str, result));
                 }
                 SetResult::Noop => {
-                    if state.noop_reported.insert(noop_key) {
+                    if noop_reported.insert(noop_key) {
                         ppfmt.infof(&format!("Record {domain_str} is up to date"));
                     }
                 }
@@ -289,34 +238,32 @@ pub async fn update_once(
         let noop_key = format!("waf:{}", waf_list.describe());
         match result {
             SetResult::Updated(previous) => {
-                state.noop_reported.remove(&noop_key);
+                noop_reported.remove(&noop_key);
                 notify = true;
                 let all_ip_strs: Vec<String> = all_ips.iter().map(|ip| ip.to_string()).collect();
-                messages.push(Message::new_ok(&set_change_message(
+                messages.push(Message::new(&set_change_message(
                     &format!("WAF 列表 {}", waf_list.list_name),
                     &previous,
                     &all_ip_strs,
                 )));
             }
             SetResult::Failed | SetResult::ReadFailed => {
-                state.noop_reported.remove(&noop_key);
-                notify = true;
+                // Operational problems stay in the logs; the exit code is
+                // the only failure signal.
+                noop_reported.remove(&noop_key);
                 all_ok = false;
-                messages.push(Message::new_fail(&with_detail(
-                    format!("更新 WAF 列表 {} 失败", waf_list.list_name),
-                    handle.take_last_error(),
-                )));
             }
             SetResult::Noop => {
-                if state.noop_reported.insert(noop_key) {
+                if noop_reported.insert(noop_key) {
                     ppfmt.infof(&format!("WAF list {} is up to date", waf_list.describe()));
                 }
             }
         }
     }
 
-    // Notify only when an IP changed or an update failed. Dry run reports to
-    // the console only, so hypothetical changes never reach Telegram.
+    // Notify only about content changes (an IP change rippling into records
+    // or lists). Operational problems stay in the logs, and dry run changes
+    // nothing, so it never notifies either.
     if notify && !config.dry_run {
         let notifier_msg = Message::merge(messages);
         notifier.send(&notifier_msg, ppfmt).await;
@@ -343,34 +290,8 @@ fn set_change_message(target: &str, previous: &[String], current: &[String]) -> 
     }
 }
 
-/// Append the recorded Cloudflare error detail to a failure line, if any.
-fn with_detail(base: String, detail: Option<String>) -> String {
-    match detail {
-        Some(detail) => format!("{base}：{detail}"),
-        None => base,
-    }
-}
-
-fn dns_failure_message(handle: &CloudflareHandle, domain: &str, result: SetResult) -> Message {
-    let detail = handle.take_last_error();
-    match result {
-        SetResult::ReadFailed => Message::new_fail(&with_detail(
-            format!("无法查询 {domain} 的 DNS 记录，本轮未执行更新"),
-            detail,
-        )),
-        SetResult::Failed => Message::new_fail(&with_detail(format!("更新 {domain} 失败"), detail)),
-        SetResult::Noop | SetResult::Updated(_) => unreachable!("not a DNS failure"),
-    }
-}
-
 /// Delete records and WAF entries when the process stops.
-pub async fn final_delete(
-    config: &AppConfig,
-    handle: &CloudflareHandle,
-    notifier: &Notifier,
-    ppfmt: &PP,
-) -> bool {
-    let mut messages = Vec::new();
+pub async fn final_delete(config: &AppConfig, handle: &CloudflareHandle, ppfmt: &PP) -> bool {
     let mut all_ok = true;
 
     for (ip_type, domains) in &config.domains {
@@ -381,32 +302,14 @@ pub async fn final_delete(
                 .final_delete(&config.zone_id, domain_str, record_type, ppfmt)
                 .await;
             all_ok &= deleted;
-            messages.push(if deleted {
-                Message::new_ok(&format!("已删除 {domain_str} 的 DNS 记录"))
-            } else {
-                Message::new_fail(&with_detail(
-                    format!("删除 {domain_str} 的 DNS 记录失败"),
-                    handle.take_last_error(),
-                ))
-            });
         }
     }
 
     for waf_list in &config.waf_lists {
         let cleared = handle.final_clear_waf_list(waf_list, ppfmt).await;
         all_ok &= cleared;
-        messages.push(if cleared {
-            Message::new_ok(&format!("已清空 WAF 列表 {}", waf_list.list_name))
-        } else {
-            Message::new_fail(&with_detail(
-                format!("清空 WAF 列表 {} 失败", waf_list.list_name),
-                handle.take_last_error(),
-            ))
-        });
     }
 
-    let msg = Message::merge(messages);
-    notifier.send(&msg, ppfmt).await;
     all_ok
 }
 
@@ -427,16 +330,6 @@ mod tests {
     // -------------------------------------------------------
     // Helpers
     // -------------------------------------------------------
-
-    #[test]
-    fn dns_read_failure_message_does_not_claim_an_update_failed() {
-        let cf = CloudflareHandle::with_base_url("http://unused", Auth::token("test-token"));
-        let message = dns_failure_message(&cf, "wap.mengying.eu.org", SetResult::ReadFailed);
-        assert_eq!(
-            message.format(),
-            "无法查询 wap.mengying.eu.org 的 DNS 记录，本轮未执行更新"
-        );
-    }
 
     fn pp() -> PP {
         // quiet=true suppresses output during tests
@@ -618,7 +511,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -659,7 +552,7 @@ mod tests {
         let ppfmt = pp();
 
         let mut cf_cache = CachedCloudflareFilter::new();
-        let mut state = CycleState::default();
+        let mut noop_reported = HashSet::new();
 
         // First call: noop_reported is empty, so "up to date" is reported and key is inserted
         let ok = update_once(
@@ -668,13 +561,13 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut state,
+            &mut noop_reported,
             &crate::test_client(),
         )
         .await;
         assert!(ok);
         assert!(
-            state.noop_reported.contains("home.example.com:A"),
+            noop_reported.contains("home.example.com:A"),
             "noop_reported should contain the domain key after first noop"
         );
 
@@ -685,13 +578,13 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut state,
+            &mut noop_reported,
             &crate::test_client(),
         )
         .await;
         assert!(ok);
         assert_eq!(
-            state.noop_reported.len(),
+            noop_reported.len(),
             1,
             "noop_reported should still have exactly one entry"
         );
@@ -743,8 +636,8 @@ mod tests {
         let ppfmt = pp();
 
         // Pre-populate noop_reported as if a previous cycle reported it
-        let mut state = CycleState::default();
-        state.noop_reported.insert("home.example.com:A".to_string());
+        let mut noop_reported = HashSet::new();
+        noop_reported.insert("home.example.com:A".to_string());
 
         let mut cf_cache = CachedCloudflareFilter::new();
         let ok = update_once(
@@ -753,13 +646,13 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut state,
+            &mut noop_reported,
             &crate::test_client(),
         )
         .await;
         assert!(ok);
         assert!(
-            !state.noop_reported.contains("home.example.com:A"),
+            !noop_reported.contains("home.example.com:A"),
             "noop_reported should be cleared after an update"
         );
     }
@@ -800,7 +693,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -847,7 +740,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -899,7 +792,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -930,7 +823,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -986,7 +879,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1059,7 +952,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1122,7 +1015,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1170,7 +1063,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1233,7 +1126,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1298,7 +1191,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1346,7 +1239,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1420,7 +1313,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1445,7 +1338,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1489,11 +1382,10 @@ mod tests {
 
         let config = make_config(HashMap::new(), domains, vec![], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
         let ppfmt = pp();
 
         // Should complete without panic
-        final_delete(&config, &cf, &notifier, &ppfmt).await;
+        final_delete(&config, &cf, &ppfmt).await;
     }
 
     /// final_delete does nothing when no records exist for the domain.
@@ -1517,10 +1409,9 @@ mod tests {
 
         let config = make_config(HashMap::new(), domains, vec![], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
         let ppfmt = pp();
 
-        final_delete(&config, &cf, &notifier, &ppfmt).await;
+        final_delete(&config, &cf, &ppfmt).await;
     }
 
     /// final_delete clears WAF list items.
@@ -1564,10 +1455,9 @@ mod tests {
 
         let config = make_config(HashMap::new(), HashMap::new(), vec![waf_list], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
         let ppfmt = pp();
 
-        final_delete(&config, &cf, &notifier, &ppfmt).await;
+        final_delete(&config, &cf, &ppfmt).await;
     }
 
     /// final_delete with no WAF items does not call DELETE.
@@ -1606,10 +1496,9 @@ mod tests {
 
         let config = make_config(HashMap::new(), HashMap::new(), vec![waf_list], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
         let ppfmt = pp();
 
-        final_delete(&config, &cf, &notifier, &ppfmt).await;
+        final_delete(&config, &cf, &ppfmt).await;
     }
 
     /// final_delete with both DNS domains and WAF lists - both are cleaned up.
@@ -1677,10 +1566,9 @@ mod tests {
 
         let config = make_config(HashMap::new(), domains, vec![waf_list], false);
         let cf = handle(&server.uri());
-        let notifier = empty_notifier();
         let ppfmt = pp();
 
-        final_delete(&config, &cf, &notifier, &ppfmt).await;
+        final_delete(&config, &cf, &ppfmt).await;
     }
 
     // -------------------------------------------------------
@@ -1729,7 +1617,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1793,7 +1681,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1854,7 +1742,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1891,7 +1779,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1958,7 +1846,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;
@@ -1994,36 +1882,10 @@ mod tests {
         );
     }
 
-    /// A failed read records the Cloudflare error detail, which the
-    /// notification line then includes.
+    /// Detection and update problems stay in the logs: only content changes
+    /// trigger notifications.
     #[tokio::test]
-    async fn dns_failure_message_includes_recorded_error_detail() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path_regex("/zones/zone-abc/dns_records"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "success": false,
-                "errors": [{ "code": 9109, "message": "Invalid access token" }]
-            })))
-            .mount(&server)
-            .await;
-
-        let cf = handle(&server.uri());
-        assert!(cf.list_records("zone-abc", "A", &pp()).await.is_none());
-        let message = dns_failure_message(&cf, "home.example.com", SetResult::ReadFailed);
-        assert!(
-            message
-                .format()
-                .contains("Invalid access token (code 9109)"),
-            "notification should carry the API error detail: {}",
-            message.format()
-        );
-    }
-
-    /// A detection failure notifies once when it starts and once when it
-    /// recovers; the cycles in between stay silent.
-    #[tokio::test]
-    async fn detection_failure_notifies_on_transition_only() {
+    async fn detection_failure_does_not_notify() {
         crate::init_crypto();
         let server = MockServer::start().await;
 
@@ -2032,111 +1894,42 @@ mod tests {
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
-        Mock::given(method("GET"))
-            .and(path("/detect-ip-ok"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("93.184.216.34"))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path_regex("/zones/zone-abc/dns_records"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(dns_records_empty()))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/zones/zone-abc/dns_records"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(dns_record_created(
-                "rec-1",
-                "home.example.com",
-                "93.184.216.34",
-            )))
-            .mount(&server)
-            .await;
-        // One message for the failure transition, one for the recovery.
+        // A detection failure must not reach Telegram.
         Mock::given(method("POST"))
             .and(path("/botbot-token/sendMessage"))
             .respond_with(ResponseTemplate::new(200))
-            .expect(2)
+            .expect(0)
             .mount(&server)
             .await;
 
         let notifier = Notifier::telegram(
             TelegramNotifier::with_api_base("bot-token", "1", &server.uri()).unwrap(),
         );
-        let mut providers_failed = HashMap::new();
-        providers_failed.insert(
+        let mut providers = HashMap::new();
+        providers.insert(
             IpType::V4,
             ProviderType::CustomURL {
                 url: format!("{}/detect-ip", server.uri()),
             },
         );
-        let mut providers_ok = HashMap::new();
-        providers_ok.insert(
-            IpType::V4,
-            ProviderType::CustomURL {
-                url: format!("{}/detect-ip-ok", server.uri()),
-            },
-        );
         let mut domains = HashMap::new();
         domains.insert(IpType::V4, vec!["home.example.com".to_string()]);
-        let failing = make_config(providers_failed, domains.clone(), vec![], false);
-        let recovered = make_config(providers_ok, domains, vec![], false);
+        let config = make_config(providers, domains, vec![], false);
 
         let cf = handle(&server.uri());
         let ppfmt = pp();
         let mut cf_cache = CachedCloudflareFilter::new();
-        let mut state = CycleState::default();
-
-        // First cycle: failure begins -> notified.
-        assert!(
-            update_once(
-                &failing,
-                &cf,
-                &notifier,
-                &mut cf_cache,
-                &ppfmt,
-                &mut state,
-                &crate::test_client(),
-            )
-            .await
-        );
-        // Second cycle: still failing -> silent.
-        assert!(
-            update_once(
-                &failing,
-                &cf,
-                &notifier,
-                &mut cf_cache,
-                &ppfmt,
-                &mut state,
-                &crate::test_client(),
-            )
-            .await
-        );
-        // Third cycle: detection works again -> recovery notified.
-        assert!(
-            update_once(
-                &recovered,
-                &cf,
-                &notifier,
-                &mut cf_cache,
-                &ppfmt,
-                &mut state,
-                &crate::test_client(),
-            )
-            .await
-        );
-
-        let bodies: Vec<String> = server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|request| String::from_utf8_lossy(&request.body).contains("chat_id"))
-            .map(|request| String::from_utf8_lossy(&request.body).to_string())
-            .collect();
-        assert_eq!(bodies.len(), 2, "only the transitions notify: {bodies:?}");
-        assert!(bodies[0].contains("检测失败"), "{}", bodies[0]);
-        assert!(bodies[1].contains("检测已恢复"), "{}", bodies[1]);
+        let ok = update_once(
+            &config,
+            &cf,
+            &notifier,
+            &mut cf_cache,
+            &ppfmt,
+            &mut HashSet::new(),
+            &crate::test_client(),
+        )
+        .await;
+        assert!(ok);
     }
 
     /// A definitive absence on one family must not strip that family's IPs
@@ -2184,7 +1977,7 @@ mod tests {
             &notifier,
             &mut cf_cache,
             &ppfmt,
-            &mut CycleState::default(),
+            &mut HashSet::new(),
             &crate::test_client(),
         )
         .await;

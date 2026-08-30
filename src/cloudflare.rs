@@ -1,7 +1,6 @@
 use crate::pp::PP;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -230,9 +229,6 @@ pub struct CloudflareHandle {
     operation_timeout: Duration,
     managed_comment_regex: Option<regex_lite::Regex>,
     managed_waf_comment_regex: Option<regex_lite::Regex>,
-    /// Reason for the most recent failed API interaction, so callers can
-    /// include it in notifications. Sequential single-task use only.
-    last_error: RefCell<Option<String>>,
 }
 
 impl CloudflareHandle {
@@ -254,7 +250,6 @@ impl CloudflareHandle {
             operation_timeout: update_timeout,
             managed_comment_regex,
             managed_waf_comment_regex,
-            last_error: RefCell::new(None),
         }
     }
 
@@ -274,19 +269,7 @@ impl CloudflareHandle {
             operation_timeout: Duration::from_secs(10),
             managed_comment_regex: None,
             managed_waf_comment_regex: None,
-            last_error: RefCell::new(None),
         }
-    }
-
-    /// Best-effort reason for the most recent failed API interaction, for
-    /// including in notifications. Each failure overwrites it; reading it
-    /// consumes it.
-    pub fn take_last_error(&self) -> Option<String> {
-        self.last_error.borrow_mut().take()
-    }
-
-    fn record_last_error(&self, detail: String) {
-        *self.last_error.borrow_mut() = Some(detail);
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -323,9 +306,10 @@ impl CloudflareHandle {
                     match resp.json::<T>().await {
                         Ok(value) => {
                             if value.is_failure() {
-                                let summary = value.error_summary();
-                                self.record_last_error(summary.clone());
-                                ppfmt.warningf(&format!("API {method} '{url}' failed: {summary}"));
+                                ppfmt.warningf(&format!(
+                                    "API {method} '{url}' failed: {}",
+                                    value.error_summary()
+                                ));
                             }
                             Some(value)
                         }
@@ -333,7 +317,6 @@ impl CloudflareHandle {
                             ppfmt.warningf(&format!(
                                 "API {method} '{url}' returned invalid JSON: {error}"
                             ));
-                            self.record_last_error(format!("invalid JSON response: {error}"));
                             None
                         }
                     }
@@ -356,13 +339,11 @@ impl CloudflareHandle {
                     ppfmt.warningf(&format!(
                         "API {method} '{url_str}' failed: HTTP {status}: {detail}"
                     ));
-                    self.record_last_error(format!("HTTP {status}: {detail}"));
                     None
                 }
             }
             Err(e) => {
                 ppfmt.warningf(&format!("API {method} '{url}' error: {e}"));
-                self.record_last_error(e.to_string());
                 None
             }
         }
@@ -772,11 +753,10 @@ impl CloudflareHandle {
             match status.status.as_str() {
                 "completed" => return true,
                 "failed" => {
-                    let detail = status.error.as_deref().unwrap_or("unknown error");
                     ppfmt.warningf(&format!(
-                        "WAF list operation {operation_id} failed: {detail}"
+                        "WAF list operation {operation_id} failed: {}",
+                        status.error.as_deref().unwrap_or("unknown error")
                     ));
-                    self.record_last_error(format!("bulk operation failed: {detail}"));
                     return false;
                 }
                 "pending" | "running" if Instant::now() < deadline => {
@@ -784,14 +764,12 @@ impl CloudflareHandle {
                 }
                 "pending" | "running" => {
                     ppfmt.warningf(&format!("WAF list operation {operation_id} timed out"));
-                    self.record_last_error("bulk operation timed out".to_string());
                     return false;
                 }
                 other => {
                     ppfmt.warningf(&format!(
                         "WAF list operation {operation_id} returned status '{other}'"
                     ));
-                    self.record_last_error(format!("bulk operation returned status '{other}'"));
                     return false;
                 }
             }
@@ -810,9 +788,7 @@ impl CloudflareHandle {
         let list_meta = match self.find_waf_list(waf_list, ppfmt).await {
             Some(meta) => meta,
             None => {
-                let detail = format!("WAF list {} not found", waf_list.describe());
-                ppfmt.warningf(&detail);
-                self.record_last_error(detail);
+                ppfmt.warningf(&format!("WAF list {} not found", waf_list.describe()));
                 return SetResult::Failed;
             }
         };
@@ -1070,29 +1046,6 @@ mod tests {
         assert!(cf.list_records("zone-1", "A", &pp()).await.is_none());
     }
 
-    /// A failed API call records its reason for the notification layer, and
-    /// reading consumes it.
-    #[tokio::test]
-    async fn failed_api_request_records_error_detail() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/zones/zone-1/dns_records"))
-            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
-                "success": false,
-                "errors": [{ "code": 9109, "message": "Invalid access token" }]
-            })))
-            .mount(&server)
-            .await;
-
-        let cf = handle(&server.uri());
-        assert!(cf.list_records("zone-1", "A", &pp()).await.is_none());
-        assert_eq!(
-            cf.take_last_error().as_deref(),
-            Some("HTTP 403 Forbidden: Invalid access token (code 9109)")
-        );
-        assert_eq!(cf.take_last_error(), None);
-    }
-
     fn handle(base_url: &str) -> CloudflareHandle {
         CloudflareHandle::with_base_url(base_url, test_auth())
     }
@@ -1111,7 +1064,6 @@ mod tests {
             operation_timeout: Duration::from_secs(10),
             managed_comment_regex: Some(regex_lite::Regex::new(pattern).unwrap()),
             managed_waf_comment_regex: None,
-            last_error: RefCell::new(None),
         }
     }
 

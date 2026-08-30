@@ -126,7 +126,7 @@ separate working directory and service when managing a different zone.
 | `managed_records_comment_regex` | string/null | `null` | Only manage DNS records whose comment matches |
 | `waf_list_item_comment` | string/null | `null` | Comment written to WAF list items |
 | `managed_waf_list_items_comment_regex` | string/null | `null` | Only manage WAF items whose comment matches |
-| `detection_timeout` | string | `5s` | Public IP lookup timeout |
+| `detection_timeout` | string | `10s` | Public IP lookup timeout |
 | `update_timeout` | string | `30s` | Cloudflare API timeout |
 | `reject_cloudflare_ips` | boolean | `true` | Reject addresses in Cloudflare's published ranges |
 | `quiet` | boolean | `false` | Suppress informational output |
@@ -152,13 +152,13 @@ target chat ID directly:
 }
 ```
 
-Notifications are sent when records or WAF lists change, or when an update
-fails. The first line summarizes the outcome; setting `name` prefixes it with
-the instance name. Failed updates include the error detail returned by
-Cloudflare. The first failed IP lookup for an address family and its recovery
-each send one notification, and the cycles in between stay silent. `--dry-run`
-prints to the console only and sends nothing. The token is stored in
-`config.json`, so keep the file at mode `0600`.
+Notifications are sent only when the content of DNS records or WAF lists
+changes, for example `已更新 home.example.com: 1.2.3.4 -> 5.6.7.8` after an
+IP change. The first line carries an instance summary; setting `name` prefixes
+it with the instance name. Detection failures, update failures, and other
+operational problems are written to the log only; inspect them with journalctl
+or the service log. `--dry-run` prints to the console only and sends nothing.
+The token is stored in `config.json`, so keep the file at mode `0600`.
 
 ### IP providers
 

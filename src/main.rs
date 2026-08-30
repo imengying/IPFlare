@@ -13,6 +13,7 @@ use crate::notifier::Notifier;
 use crate::pp::PP;
 use rand::RngExt;
 use reqwest::Client;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal;
@@ -97,7 +98,7 @@ async fn main() {
             ppfmt.infof("[DRY RUN] Would delete records on stop.");
         } else {
             ppfmt.infof("Deleting records on stop...");
-            success &= updater::final_delete(&app_config, &handle, &notifier, &ppfmt).await;
+            success &= updater::final_delete(&app_config, &handle, &ppfmt).await;
         }
     }
     if !success {
@@ -139,7 +140,7 @@ async fn run_schedule(
     cf_cache: &mut cf_ip_filter::CachedCloudflareFilter,
     range_client: &Client,
 ) -> bool {
-    let mut state = updater::CycleState::default();
+    let mut noop_reported = HashSet::new();
 
     if matches!(config.update_cron, CronSchedule::Once) {
         return updater::update_once(
@@ -148,7 +149,7 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut state,
+            &mut noop_reported,
             range_client,
         )
         .await;
@@ -170,7 +171,7 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut state,
+            &mut noop_reported,
             range_client,
         )
         .await;
@@ -196,7 +197,7 @@ async fn run_schedule(
             notifier,
             cf_cache,
             ppfmt,
-            &mut state,
+            &mut noop_reported,
             range_client,
         )
         .await;

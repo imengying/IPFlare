@@ -21,7 +21,7 @@
   "managed_records_comment_regex": null,
   "waf_list_item_comment": null,
   "managed_waf_list_items_comment_regex": null,
-  "detection_timeout": "5s",
+  "detection_timeout": "10s",
   "update_timeout": "30s",
   "reject_cloudflare_ips": true,
   "quiet": false,

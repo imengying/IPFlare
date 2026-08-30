@@ -138,7 +138,7 @@ fn default_ttl() -> i64 {
 }
 
 fn default_detection_timeout() -> String {
-    "5s".to_string()
+    "10s".to_string()
 }
 
 fn default_update_timeout() -> String {

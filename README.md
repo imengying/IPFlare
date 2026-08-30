@@ -127,7 +127,7 @@ cp config-example.json config.json
 | `managed_records_comment_regex` | string/null | `null` | 只管理注释匹配的 DNS 记录 |
 | `waf_list_item_comment` | string/null | `null` | 写入 WAF 列表项的注释 |
 | `managed_waf_list_items_comment_regex` | string/null | `null` | 只管理注释匹配的 WAF 列表项 |
-| `detection_timeout` | string | `5s` | 公网 IP 检测超时 |
+| `detection_timeout` | string | `10s` | 公网 IP 检测超时 |
 | `update_timeout` | string | `30s` | Cloudflare API 请求超时 |
 | `reject_cloudflare_ips` | boolean | `true` | 拒绝 Cloudflare 官方网段中的地址 |
 | `quiet` | boolean | `false` | 隐藏普通信息 |
@@ -151,12 +151,12 @@ Telegram 是唯一支持的通知方式：
 }
 ```
 
-DNS 记录或 WAF 列表发生变化以及更新失败时会发送通知。通知首行是结果摘要
-（`ipflare 更新成功` 或 `ipflare 更新失败`），配置 `name` 后形如
-`【名称】ipflare 更新成功`；失败的通知会附带 Cloudflare 返回的错误详情。
-某个地址族首次检测失败和随后恢复时也会各推送一条，中间的失败周期保持
-静默。`--dry-run` 只输出到控制台，不发送通知。Token 直接保存在
-`config.json` 中，请保持文件权限为 `0600`。
+只在 DNS 记录或 WAF 列表内容发生变化时发送通知，例如 IP 变动后的
+`已更新 home.example.com: 1.2.3.4 -> 5.6.7.8`。首行带实例名摘要，配置
+`name` 后形如 `【名称】ipflare 更新成功`。检测失败、更新失败等运行问题
+只写入日志，不发送通知，请通过 journalctl 或服务日志排查。`--dry-run`
+只输出到控制台，不发送通知。Token 直接保存在 `config.json` 中，请保持
+文件权限为 `0600`。
 
 ### IP 检测方式
 

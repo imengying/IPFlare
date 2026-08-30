@@ -5,21 +5,12 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct Message {
     pub lines: Vec<String>,
-    pub ok: bool,
 }
 
 impl Message {
-    pub fn new_ok(msg: &str) -> Self {
+    pub fn new(msg: &str) -> Self {
         Self {
             lines: vec![msg.to_string()],
-            ok: true,
-        }
-    }
-
-    pub fn new_fail(msg: &str) -> Self {
-        Self {
-            lines: vec![msg.to_string()],
-            ok: false,
         }
     }
 
@@ -33,12 +24,10 @@ impl Message {
 
     pub fn merge(messages: Vec<Message>) -> Self {
         let mut lines = Vec::new();
-        let mut ok = true;
         for message in messages {
             lines.extend(message.lines);
-            ok &= message.ok;
         }
-        Self { lines, ok }
+        Self { lines }
     }
 }
 
@@ -82,17 +71,12 @@ impl Notifier {
         }
     }
 
-    /// The first line summarizes the outcome (`Message::ok`) so it is readable
-    /// in the notification tray; the per-target lines follow.
+    /// The first line identifies the instance in the notification tray; the
+    /// per-target change lines follow. Only content changes are notified.
     fn render(&self, message: &Message) -> String {
-        let status = if message.ok {
-            "更新成功"
-        } else {
-            "更新失败"
-        };
         match &self.name {
-            Some(name) => format!("【{name}】ipflare {status}\n{}", message.format()),
-            None => format!("ipflare {status}\n{}", message.format()),
+            Some(name) => format!("【{name}】ipflare 更新成功\n{}", message.format()),
+            None => format!("ipflare 更新成功\n{}", message.format()),
         }
     }
 }
@@ -151,21 +135,19 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn merges_messages_and_preserves_failure() {
+    fn merges_messages() {
         let merged = Message::merge(vec![
-            Message::new_ok("updated example.com"),
-            Message::new_fail("failed example.net"),
+            Message::new("updated example.com"),
+            Message::new("updated example.net"),
         ]);
 
-        assert_eq!(merged.format(), "updated example.com\nfailed example.net");
-        assert!(!merged.ok);
+        assert_eq!(merged.format(), "updated example.com\nupdated example.net");
     }
 
     #[test]
     fn merges_empty_messages() {
         let merged = Message::merge(Vec::new());
         assert!(merged.is_empty());
-        assert!(merged.ok);
     }
 
     #[tokio::test]
@@ -225,7 +207,7 @@ mod tests {
         .named(Some("home".to_string()));
 
         notifier
-            .send(&Message::new_ok("updated example.com"), &PP::new(true))
+            .send(&Message::new("updated example.com"), &PP::new(true))
             .await;
     }
 }
