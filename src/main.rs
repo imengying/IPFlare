@@ -130,6 +130,12 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Run the configured schedule.
+///
+/// The return value only reports failures under `@once`, where it becomes the
+/// exit code. A long-running `@every` schedule deliberately survives a failed
+/// cycle — the next cycle retries — so failures there are left in the log and
+/// this returns true unless the schedule itself could not run.
 #[allow(clippy::too_many_arguments)]
 async fn run_schedule(
     config: &AppConfig,

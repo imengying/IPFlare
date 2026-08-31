@@ -239,6 +239,9 @@ configure() {
     proxied="false"
     waf_lists_json="[]"
     telegram_json="null"
+    # Omitted entirely when unset: `name` is Option<String> with serde default,
+    # so an absent key is the same as no name.
+    name_json=""
     if confirm "配置其他选项（代理、更新间隔、WAF、Telegram）" no; then
         if confirm "启用 Cloudflare 代理" no; then
             proxied="true"
@@ -280,14 +283,28 @@ configure() {
                 printf 'Chat ID 必须是整数。\n' >&3
             done
             telegram_json="{\"bot_token\":\"${telegram_bot_token}\",\"chat_id\":\"${telegram_chat_id}\"}"
+
+            # Only useful alongside notifications: it prefixes the summary line
+            # so several instances sharing one bot can be told apart.
+            printf '实例名称（可留空，多实例共用一个 Bot 时用于区分）: ' >&3
+            IFS= read -r instance_name <&3 || fail "无法读取终端输入"
+            if [ -n "${instance_name}" ]; then
+                case "${instance_name}" in
+                    *\"* | *\\*) fail "实例名称不能包含引号或反斜杠" ;;
+                esac
+                name_json="  \"name\": \"${instance_name}\","
+            fi
         fi
     fi
 
     account_id="$(printf '%s' "${account_id}" | tr '[:upper:]' '[:lower:]')"
     zone_id="$(printf '%s' "${zone_id}" | tr '[:upper:]' '[:lower:]')"
     domain="$(printf '%s' "${domain}" | tr '[:upper:]' '[:lower:]')"
-    cat >"${temp_dir}/config.json" <<JSON
+    # name_json is blank when no instance name was given; the sed drops the
+    # resulting empty line so the file stays tidy either way.
+    cat <<JSON | sed '/^[[:space:]]*$/d' >"${temp_dir}/config.json"
 {
+${name_json}
   "api_token": "${api_token}",
   "account_id": "${account_id}",
   "zone_id": "${zone_id}",

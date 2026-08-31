@@ -53,7 +53,7 @@ impl Auth {
 
 // --- WAF List ---
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WAFList {
     pub account_id: String,
     pub list_name: String,
@@ -167,7 +167,7 @@ pub struct ListCursors {
     pub after: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 pub struct DnsRecord {
     pub id: String,
     pub name: String,
@@ -494,7 +494,7 @@ impl CloudflareHandle {
             .list_records_by_name(zone_id, record_type, fqdn, ppfmt)
             .await
         else {
-            return SetResult::ReadFailed;
+            return SetResult::Failed;
         };
         let managed: Vec<&DnsRecord> = existing
             .iter()
@@ -904,13 +904,15 @@ impl CloudflareHandle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum SetResult {
     Noop,
-    /// The managed addresses changed. Carries the managed addresses as they
-    /// were before the update, for old -> new reporting in notifications.
+    /// A write happened. Carries the managed addresses as they were before it,
+    /// so the caller can tell an address change from a metadata-only rewrite.
     Updated(Vec<String>),
-    ReadFailed,
+    /// The read of existing state or the write itself failed. Both leave the
+    /// managed records untouched from this cycle's point of view and are only
+    /// reported in the log, so they are not distinguished.
     Failed,
 }
 
@@ -1852,7 +1854,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(result, SetResult::ReadFailed);
+        assert_eq!(result, SetResult::Failed);
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].method, wiremock::http::Method::GET);

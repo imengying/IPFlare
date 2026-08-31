@@ -377,7 +377,7 @@ pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
     match TelegramNotifier::new(&telegram.bot_token, &telegram.chat_id) {
         Ok(notifier) => {
             ppfmt.infof("Notifications: Telegram");
-            Notifier::telegram(notifier).named(config.name.clone())
+            Notifier::telegram(notifier, config.name.clone())
         }
         Err(error) => {
             ppfmt.warningf(&format!("Failed to setup Telegram notifications: {error}"));

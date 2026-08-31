@@ -2,37 +2,10 @@ use crate::pp::PP;
 use reqwest::Client;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub lines: Vec<String>,
-}
-
-impl Message {
-    pub fn new(msg: &str) -> Self {
-        Self {
-            lines: vec![msg.to_string()],
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
-
-    pub fn format(&self) -> String {
-        self.lines.join("\n")
-    }
-
-    pub fn merge(messages: Vec<Message>) -> Self {
-        let mut lines = Vec::new();
-        for message in messages {
-            lines.extend(message.lines);
-        }
-        Self { lines }
-    }
-}
-
 pub struct Notifier {
     telegram: Option<TelegramNotifier>,
+    /// Shown at the front of the summary line, so notifications from several
+    /// instances sharing one bot can be told apart.
     name: Option<String>,
 }
 
@@ -44,27 +17,22 @@ impl Notifier {
         }
     }
 
-    pub fn telegram(notifier: TelegramNotifier) -> Self {
+    pub fn telegram(notifier: TelegramNotifier, name: Option<String>) -> Self {
         Self {
             telegram: Some(notifier),
-            name: None,
+            name,
         }
     }
 
-    /// Instance name shown at the front of the summary line, so notifications
-    /// from several instances sharing one bot can be told apart.
-    pub fn named(mut self, name: Option<String>) -> Self {
-        self.name = name;
-        self
-    }
-
-    pub async fn send(&self, message: &Message, ppfmt: &PP) {
-        if message.is_empty() {
+    /// Send one notification listing `lines`, or nothing when there is nothing
+    /// to report.
+    pub async fn send(&self, lines: &[String], ppfmt: &PP) {
+        if lines.is_empty() {
             return;
         }
 
         if let Some(telegram) = &self.telegram {
-            let text = self.render(message);
+            let text = self.render(lines);
             if !telegram.send_text(&text).await {
                 ppfmt.warningf("Failed to send Telegram notification");
             }
@@ -73,10 +41,11 @@ impl Notifier {
 
     /// The first line identifies the instance in the notification tray; the
     /// per-target change lines follow. Only content changes are notified.
-    fn render(&self, message: &Message) -> String {
+    fn render(&self, lines: &[String]) -> String {
+        let body = lines.join("\n");
         match &self.name {
-            Some(name) => format!("【{name}】ipflare 更新成功\n{}", message.format()),
-            None => format!("ipflare 更新成功\n{}", message.format()),
+            Some(name) => format!("【{name}】ipflare 更新成功\n{body}"),
+            None => format!("ipflare 更新成功\n{body}"),
         }
     }
 }
@@ -134,20 +103,36 @@ mod tests {
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Several change lines are joined under one summary header.
     #[test]
-    fn merges_messages() {
-        let merged = Message::merge(vec![
-            Message::new("updated example.com"),
-            Message::new("updated example.net"),
-        ]);
-
-        assert_eq!(merged.format(), "updated example.com\nupdated example.net");
+    fn joins_lines_under_the_summary_header() {
+        let notifier = Notifier::disabled();
+        assert_eq!(
+            notifier.render(&[
+                "updated example.com".to_string(),
+                "updated example.net".to_string(),
+            ]),
+            "ipflare 更新成功\nupdated example.com\nupdated example.net"
+        );
     }
 
-    #[test]
-    fn merges_empty_messages() {
-        let merged = Message::merge(Vec::new());
-        assert!(merged.is_empty());
+    /// Nothing to report means no request at all, not an empty message.
+    #[tokio::test]
+    async fn sends_nothing_when_there_are_no_lines() {
+        crate::init_crypto();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest-token/sendMessage"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let notifier = Notifier::telegram(
+            TelegramNotifier::with_api_base("test-token", "1", &server.uri()).unwrap(),
+            None,
+        );
+        notifier.send(&[], &PP::new(true)).await;
     }
 
     #[tokio::test]
@@ -203,11 +188,11 @@ mod tests {
 
         let notifier = Notifier::telegram(
             TelegramNotifier::with_api_base("test-token", "-100123", &server.uri()).unwrap(),
-        )
-        .named(Some("home".to_string()));
+            Some("home".to_string()),
+        );
 
         notifier
-            .send(&Message::new("updated example.com"), &PP::new(true))
+            .send(&["updated example.com".to_string()], &PP::new(true))
             .await;
     }
 }

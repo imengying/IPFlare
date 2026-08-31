@@ -1,7 +1,7 @@
 use crate::cf_ip_filter::CachedCloudflareFilter;
 use crate::cloudflare::{CloudflareHandle, SetResult};
 use crate::config::AppConfig;
-use crate::notifier::{Message, Notifier};
+use crate::notifier::Notifier;
 use crate::pp::PP;
 use crate::provider::{DetectionOutcome, IpType};
 use reqwest::Client;
@@ -9,6 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 /// Run a single update cycle.
+///
+/// Returns whether every operation succeeded. Only `@once` acts on this — it
+/// becomes the process exit code. Under `@every` the caller discards it and the
+/// process keeps running, so a failure there surfaces only as a log line; see
+/// [`crate::run_schedule`].
 pub async fn update_once(
     config: &AppConfig,
     handle: &CloudflareHandle,
@@ -19,7 +24,7 @@ pub async fn update_once(
     range_client: &Client,
 ) -> bool {
     let mut all_ok = true;
-    let mut messages = Vec::new();
+    let mut messages: Vec<String> = Vec::new();
     let mut notify = false;
 
     // Detect IPs for each provider. Types in `detection_failed` had a
@@ -155,28 +160,30 @@ pub async fn update_once(
             match result {
                 SetResult::Updated(previous) => {
                     noop_reported.remove(&noop_key);
-                    notify = true;
-                    if ips.is_empty() {
-                        let reason = format!("未检测到 {} 地址", ip_type.describe());
-                        let text = if previous.is_empty() {
-                            format!("已删除 {domain_str} 的 DNS 记录（{reason}）")
+                    let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
+                    // A metadata-only rewrite (proxied/ttl/comment) reports
+                    // Updated with an unchanged address set; that is not worth
+                    // notifying about.
+                    if addresses_changed(&previous, &ip_strs) {
+                        notify = true;
+                        if ips.is_empty() {
+                            let reason = format!("未检测到 {} 地址", ip_type.describe());
+                            let text = if previous.is_empty() {
+                                format!("已删除 {domain_str} 的 DNS 记录（{reason}）")
+                            } else {
+                                format!(
+                                    "已删除 {domain_str} 的 DNS 记录（原地址 {}，{reason}）",
+                                    previous.join(", ")
+                                )
+                            };
+                            messages.push(text);
                         } else {
-                            format!(
-                                "已删除 {domain_str} 的 DNS 记录（原地址 {}，{reason}）",
-                                previous.join(", ")
-                            )
-                        };
-                        messages.push(Message::new(&text));
-                    } else {
-                        let ip_strs: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
-                        messages.push(Message::new(&set_change_message(
-                            domain_str, &previous, &ip_strs,
-                        )));
+                            messages.push(set_change_message(domain_str, &previous, &ip_strs));
+                        }
                     }
                 }
-                SetResult::Failed | SetResult::ReadFailed => {
-                    // Operational problems stay in the logs; the exit code is
-                    // the only failure signal.
+                SetResult::Failed => {
+                    // Operational problems stay in the logs; nothing is pushed.
                     noop_reported.remove(&noop_key);
                     all_ok = false;
                 }
@@ -239,17 +246,20 @@ pub async fn update_once(
         match result {
             SetResult::Updated(previous) => {
                 noop_reported.remove(&noop_key);
-                notify = true;
                 let all_ip_strs: Vec<String> = all_ips.iter().map(|ip| ip.to_string()).collect();
-                messages.push(Message::new(&set_change_message(
-                    &format!("WAF 列表 {}", waf_list.list_name),
-                    &previous,
-                    &all_ip_strs,
-                )));
+                // Same as the DNS path: a comment-only rewrite leaves the
+                // address set alone and must not notify.
+                if addresses_changed(&previous, &all_ip_strs) {
+                    notify = true;
+                    messages.push(set_change_message(
+                        &format!("WAF 列表 {}", waf_list.list_name),
+                        &previous,
+                        &all_ip_strs,
+                    ));
+                }
             }
-            SetResult::Failed | SetResult::ReadFailed => {
-                // Operational problems stay in the logs; the exit code is
-                // the only failure signal.
+            SetResult::Failed => {
+                // Operational problems stay in the logs; nothing is pushed.
                 noop_reported.remove(&noop_key);
                 all_ok = false;
             }
@@ -265,15 +275,25 @@ pub async fn update_once(
     // or lists). Operational problems stay in the logs, and dry run changes
     // nothing, so it never notifies either.
     if notify && !config.dry_run {
-        let notifier_msg = Message::merge(messages);
-        notifier.send(&notifier_msg, ppfmt).await;
+        notifier.send(&messages, ppfmt).await;
     }
 
     all_ok
 }
 
-/// Compose the notification line for a managed address set that changed,
-/// showing the previous addresses when they differ.
+/// Whether the managed address set actually changed.
+///
+/// `SetResult::Updated` also fires for metadata-only writes — a changed
+/// `proxied`, `ttl`, or comment rewrites the record while the address stays the
+/// same. Those must not notify, so the address sets are compared directly.
+fn addresses_changed(previous: &[String], current: &[String]) -> bool {
+    let old: HashSet<&String> = previous.iter().collect();
+    let new: HashSet<&String> = current.iter().collect();
+    old != new
+}
+
+/// Compose the notification line for a managed address set that changed.
+/// Only called when [`addresses_changed`] is true.
 fn set_change_message(target: &str, previous: &[String], current: &[String]) -> String {
     if current.is_empty() {
         return format!("已清空 {target}（原地址 {}）", previous.join(", "));
@@ -282,12 +302,7 @@ fn set_change_message(target: &str, previous: &[String], current: &[String]) -> 
     if previous.is_empty() {
         return format!("已添加 {target} -> {new}");
     }
-    let old_set: HashSet<&String> = previous.iter().collect();
-    if old_set.len() == current.len() && current.iter().all(|ip| old_set.contains(ip)) {
-        format!("已更新 {target}（IP 未变）")
-    } else {
-        format!("已更新 {target}: {} -> {}", previous.join(", "), new)
-    }
+    format!("已更新 {target}: {} -> {}", previous.join(", "), new)
 }
 
 /// Delete records and WAF entries when the process stops.
@@ -1869,17 +1884,105 @@ mod tests {
             "已更新 a.example.com: 1.2.3.4 -> 5.6.7.8"
         );
         assert_eq!(
-            set_change_message(
-                "a.example.com",
-                &["1.2.3.4".to_string()],
-                &["1.2.3.4".to_string()]
-            ),
-            "已更新 a.example.com（IP 未变）"
-        );
-        assert_eq!(
             set_change_message("WAF 列表 my_list", &["1.2.3.4".to_string()], &[]),
             "已清空 WAF 列表 my_list（原地址 1.2.3.4）"
         );
+    }
+
+    /// The notify gate: only a changed address set counts. A metadata-only
+    /// rewrite (proxied/ttl/comment) reports Updated with the same addresses
+    /// and must stay silent, including when the order differs.
+    #[test]
+    fn addresses_changed_ignores_order_and_metadata_only_writes() {
+        let one = ["1.2.3.4".to_string()];
+        let two = ["1.2.3.4".to_string(), "5.6.7.8".to_string()];
+        let two_reordered = ["5.6.7.8".to_string(), "1.2.3.4".to_string()];
+
+        assert!(!addresses_changed(&one, &one), "同一地址不算变化");
+        assert!(
+            !addresses_changed(&two, &two_reordered),
+            "仅顺序不同不算变化"
+        );
+        assert!(!addresses_changed(&[], &[]), "都为空不算变化");
+
+        assert!(addresses_changed(&one, &two), "新增地址算变化");
+        assert!(addresses_changed(&two, &one), "移除地址算变化");
+        assert!(addresses_changed(&[], &one), "从无到有算变化");
+        assert!(addresses_changed(&one, &[]), "清空算变化");
+        assert!(
+            addresses_changed(&one, &["5.6.7.8".to_string()]),
+            "地址替换算变化"
+        );
+    }
+
+    /// A proxied/ttl/comment change rewrites the record while the IP stays the
+    /// same. The write must still happen, but no notification may be sent.
+    #[tokio::test]
+    async fn metadata_only_change_updates_record_without_notifying() {
+        crate::init_crypto();
+        let server = MockServer::start().await;
+        let zone_id = "zone-abc";
+        let domain = "home.example.com";
+        let ip = "198.51.100.42";
+
+        // Existing record already holds the detected IP but has proxied: false.
+        Mock::given(method("GET"))
+            .and(path_regex(format!("/zones/{zone_id}/dns_records")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(dns_records_one("rec-1", domain, ip)),
+            )
+            .mount(&server)
+            .await;
+
+        // Flipping proxied to true must still rewrite the record.
+        Mock::given(method("PUT"))
+            .and(path(format!("/zones/{zone_id}/dns_records/rec-1")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(dns_record_created("rec-1", domain, ip)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // The IP did not change, so Telegram must not be called.
+        Mock::given(method("POST"))
+            .and(path("/botbot-token/sendMessage"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let notifier = Notifier::telegram(
+            TelegramNotifier::with_api_base("bot-token", "1", &server.uri()).unwrap(),
+            None,
+        );
+        let mut providers = HashMap::new();
+        providers.insert(
+            IpType::V4,
+            ProviderType::Literal {
+                ips: vec![ip.parse::<IpAddr>().unwrap()],
+            },
+        );
+        let mut domains = HashMap::new();
+        domains.insert(IpType::V4, vec![domain.to_string()]);
+
+        let mut config = make_config(providers, domains, vec![], false);
+        config.proxied = true;
+
+        let cf = handle(&server.uri());
+        let ppfmt = pp();
+        let mut cf_cache = CachedCloudflareFilter::new();
+        let ok = update_once(
+            &config,
+            &cf,
+            &notifier,
+            &mut cf_cache,
+            &ppfmt,
+            &mut HashSet::new(),
+            &crate::test_client(),
+        )
+        .await;
+        assert!(ok, "the metadata rewrite itself should succeed");
     }
 
     /// Detection and update problems stay in the logs: only content changes
@@ -1904,6 +2007,7 @@ mod tests {
 
         let notifier = Notifier::telegram(
             TelegramNotifier::with_api_base("bot-token", "1", &server.uri()).unwrap(),
+            None,
         );
         let mut providers = HashMap::new();
         providers.insert(

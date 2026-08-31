@@ -46,9 +46,10 @@ Omit `sudo` when already running as root.
 
 The required prompts cover the Cloudflare API Token, Account ID, Zone ID,
 domain, and IPv4/IPv6 switches. Proxy mode, update interval, WAF, and Telegram
-are grouped under the optional "Other options" prompt. IPv4 is enabled by
-default and IPv6 is disabled; disabling an address family also disables its
-public IP lookup.
+are grouped under the optional "Other options" prompt. Enabling Telegram also
+asks for an optional instance name, used to tell apart notifications from
+several instances sharing one bot. IPv4 is enabled by default and IPv6 is
+disabled; disabling an address family also disables its public IP lookup.
 
 Run the installer again to open its update, reconfiguration, and uninstall
 menu. Updates preserve the configuration, and uninstall removes `config.json`
@@ -152,12 +153,15 @@ target chat ID directly:
 }
 ```
 
-Notifications are sent only when the content of DNS records or WAF lists
-changes, for example `已更新 home.example.com: 1.2.3.4 -> 5.6.7.8` after an
-IP change. The first line carries an instance summary; setting `name` prefixes
-it with the instance name. Detection failures, update failures, and other
-operational problems are written to the log only; inspect them with journalctl
-or the service log. `--dry-run` prints to the console only and sends nothing.
+Notifications are sent only when the addresses actually change, for example
+`已更新 home.example.com: 1.2.3.4 -> 5.6.7.8`. The first line carries an
+instance summary; setting `name` prefixes it with the instance name.
+
+Nothing is sent when the addresses are unchanged — including a record rewritten
+only because `proxied`, `ttl`, or `record_comment` changed — nor on detection or
+update failures. Operational problems are written to the log only; inspect them
+with journalctl or the service log. `--dry-run` prints to the console only.
+
 The token is stored in `config.json`, so keep the file at mode `0600`.
 
 ### IP providers

@@ -161,7 +161,7 @@ impl ProviderType {
 }
 
 /// Result of a provider detection attempt (see [`ProviderType::detect`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DetectionOutcome {
     /// One or more addresses of the requested family were detected.
     Ips(Vec<IpAddr>),
@@ -537,7 +537,7 @@ const IFA_F_DEPRECATED: u32 = 0x20;
 const IFA_F_TENTATIVE: u32 = 0x40;
 const IPV6_SCOPE_GLOBAL: u8 = 0x00;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 struct IfInet6Address {
     ip: Ipv6Addr,
     prefix_len: u8,
