@@ -562,7 +562,7 @@ select_action() {
     printf '  服务: %s (%s)\n' "$(service_state)" "${init_system}" >&3
     printf '  配置: %s\n' "${config_path}" >&3
     printf '\n' >&3
-    printf '  1) 更新或重新安装\n' >&3
+    printf '  1) 更新\n' >&3
     printf '  2) 重新配置\n' >&3
     printf '  3) 卸载\n' >&3
     printf '  0) 退出\n' >&3
