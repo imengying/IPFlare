@@ -12,7 +12,7 @@ WAF IP 列表。
 - 同步 Cloudflare WAF IP 列表
 - 可选开启 Cloudflare 代理
 - 通过注释标记并筛选受管的 DNS 记录和 WAF 列表项
-- 可选 Telegram 通知
+- 可选 Telegram、Bark 通知
 - 支持定时运行和单次运行
 - 支持预演模式和退出时清理
 - 拒绝将 Cloudflare Anycast 地址写入 DNS
@@ -54,10 +54,10 @@ wget -qO- https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | 
 IPv4 默认启用，IPv6 默认关闭。关闭某个地址族后，也会同时停止对应的
 公网 IP 检测和 DNS 更新。
 
-代理、更新间隔、WAF 和 Telegram 收在“其他选项”中，可以直接跳过。
+代理、更新间隔、WAF 和通知收在“其他选项”中，可以直接跳过。
 跳过时使用以下默认值：关闭代理、每 5 分钟更新、不配置 WAF、不启用
-Telegram。启用 Telegram 后会追问实例名称，可留空，多个实例共用一个 Bot
-时用于区分通知来源。
+通知。启用通知后可以选择 Telegram 或 Bark，两者可同时启用；随后会追问
+实例名称，可留空，多个实例共用一个账号时用于区分通知来源。
 
 重新运行脚本会打开更新、重新配置和卸载菜单。更新保留配置；
 卸载时只有明确确认才会删除 `config.json`。脚本不安装额外的管理命令。
@@ -134,14 +134,18 @@ cp config-example.json config.json
 | `quiet` | boolean | `false` | 隐藏普通信息 |
 | `name` | string/null | `null` | 实例名称，作为通知首行的前缀 |
 | `telegram` | object/null | `null` | Telegram Bot API 配置 |
+| `bark` | object/null | `null` | Bark 推送配置 |
 
 至少需要配置一个域名字段或一个 `waf_lists` 条目。时长支持秒（`30s`）、
 分钟（`5m`）、小时（`2h`）或表示秒数的整数。使用 `@once` 时，
 `update_on_start` 必须为 `true`，`delete_on_stop` 必须为 `false`。
 
-### Telegram
+### 通知
 
-Telegram 是唯一支持的通知方式：
+支持 Telegram 和 Bark，可以只配一个，也可以同时配置，消息会同时推送到
+两边。两者都未配置时不发送任何通知。
+
+Telegram 使用 Bot API：
 
 ```json
 {
@@ -152,15 +156,32 @@ Telegram 是唯一支持的通知方式：
 }
 ```
 
+Bark 使用设备 Key 推送：
+
+```json
+{
+  "bark": {
+    "device_key": "your-device-key",
+    "server": "https://api.day.app",
+    "group": "ipflare"
+  }
+}
+```
+
+`bark.server` 默认 `https://api.day.app`，自建服务时改成自己的地址；
+`group` 可省略，用于在 Bark 中归档分组。
+
 只在地址真正变化时发送通知，例如 `已更新 home.example.com: 1.2.3.4 ->
-5.6.7.8`。首行带实例名摘要，配置 `name` 后形如
-`【名称】ipflare 更新成功`。
+5.6.7.8`。Telegram 的首行带实例名摘要，配置 `name` 后形如
+`【名称】ipflare 更新成功`；Bark 使用标题和正文两个字段，摘要作为标题，
+避免被系统折叠。
 
 以下情况都不发送通知：地址没变（包括只改了 `proxied`、`ttl` 或
 `record_comment` 而重写记录的情况）、检测失败、更新失败。运行问题只写入
 日志，请通过 journalctl 或服务日志排查。`--dry-run` 只输出到控制台。
 
-Token 直接保存在 `config.json` 中，请保持文件权限为 `0600`。
+Token 和 Device Key 直接保存在 `config.json` 中，请保持文件权限为
+`0600`。
 
 ### IP 检测方式
 

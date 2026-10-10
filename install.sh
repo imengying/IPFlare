@@ -239,10 +239,11 @@ configure() {
     proxied="false"
     waf_lists_json="[]"
     telegram_json="null"
+    bark_json="null"
     # Omitted entirely when unset: `name` is Option<String> with serde default,
     # so an absent key is the same as no name.
     name_json=""
-    if confirm "配置其他选项（代理、更新间隔、WAF、Telegram）" no; then
+    if confirm "配置其他选项（代理、更新间隔、WAF、通知）" no; then
         if confirm "启用 Cloudflare 代理" no; then
             proxied="true"
         fi
@@ -263,7 +264,9 @@ configure() {
             waf_lists_json="[\"${waf_list_name}\"]"
         fi
 
+        notification_enabled=false
         if confirm "启用 Telegram 通知" no; then
+            notification_enabled=true
             prompt_secret 'Telegram Bot Token'
             telegram_bot_token="${prompt_result}"
             case "${telegram_bot_token}" in
@@ -283,10 +286,32 @@ configure() {
                 printf 'Chat ID 必须是整数。\n' >&3
             done
             telegram_json="{\"bot_token\":\"${telegram_bot_token}\",\"chat_id\":\"${telegram_chat_id}\"}"
+        fi
 
+        if confirm "启用 Bark 通知" no; then
+            notification_enabled=true
+            prompt_secret 'Bark Device Key'
+            bark_device_key="${prompt_result}"
+            case "${bark_device_key}" in
+                *[!A-Za-z0-9_-]*) fail "Bark Device Key 包含不支持的字符" ;;
+            esac
+            prompt_default 'Bark 服务器地址' 'https://api.day.app'
+            bark_server="${prompt_result}"
+            # Only characters that are safe both in a URL and inside JSON.
+            case "${bark_server}" in
+                https://* | http://*) ;;
+                *) fail "Bark 服务器地址必须以 http:// 或 https:// 开头" ;;
+            esac
+            case "${bark_server}" in
+                *[!A-Za-z0-9:/._-]*) fail "Bark 服务器地址包含不支持的字符" ;;
+            esac
+            bark_json="{\"device_key\":\"${bark_device_key}\",\"server\":\"${bark_server}\"}"
+        fi
+
+        if [ "${notification_enabled}" = true ]; then
             # Only useful alongside notifications: it prefixes the summary line
-            # so several instances sharing one bot can be told apart.
-            printf '实例名称（可留空，多实例共用一个 Bot 时用于区分）: ' >&3
+            # so several instances sharing one account can be told apart.
+            printf '实例名称（可留空，多实例共用一个账号时用于区分）: ' >&3
             IFS= read -r instance_name <&3 || fail "无法读取终端输入"
             if [ -n "${instance_name}" ]; then
                 case "${instance_name}" in
@@ -315,7 +340,8 @@ ${name_json}
   "schedule": "@every ${interval}",
   "proxied": ${proxied},
   "record_comment": "ipflare",
-  "telegram": ${telegram_json}
+  "telegram": ${telegram_json},
+  "bark": ${bark_json}
 }
 JSON
     install -d -m 0700 "${config_dir}"

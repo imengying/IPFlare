@@ -26,5 +26,6 @@
   "reject_cloudflare_ips": true,
   "quiet": false,
   "name": null,
-  "telegram": null
+  "telegram": null,
+  "bark": null
 }

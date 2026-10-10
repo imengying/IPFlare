@@ -352,7 +352,7 @@ mod tests {
     }
 
     fn empty_notifier() -> Notifier {
-        Notifier::disabled()
+        Notifier::new(None)
     }
 
     /// Build a minimal AppConfig with a single V4 domain.
@@ -399,6 +399,7 @@ mod tests {
             quiet: true,
             name: None,
             telegram: None,
+            bark: None,
         }
     }
 
@@ -1952,9 +1953,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let notifier = Notifier::telegram(
+        let notifier = Notifier::new(None).with_telegram(
             TelegramNotifier::with_api_base("bot-token", "1", &server.uri()).unwrap(),
-            None,
         );
         let mut providers = HashMap::new();
         providers.insert(
@@ -2005,9 +2005,8 @@ mod tests {
             .mount(&server)
             .await;
 
-        let notifier = Notifier::telegram(
+        let notifier = Notifier::new(None).with_telegram(
             TelegramNotifier::with_api_base("bot-token", "1", &server.uri()).unwrap(),
-            None,
         );
         let mut providers = HashMap::new();
         providers.insert(

@@ -12,7 +12,7 @@ when the public IP address changes.
 - Cloudflare WAF IP list synchronization
 - Optional Cloudflare proxying
 - Comment markers to scope which DNS records and WAF list items are managed
-- Optional Telegram notifications
+- Optional Telegram and Bark notifications
 - One-shot or interval-based execution
 - Dry-run mode and graceful shutdown cleanup
 - Rejection of Cloudflare anycast addresses
@@ -45,10 +45,11 @@ wget -qO- https://raw.githubusercontent.com/imengying/IPFlare/main/install.sh | 
 Omit `sudo` when already running as root.
 
 The required prompts cover the Cloudflare API Token, Account ID, Zone ID,
-domain, and IPv4/IPv6 switches. Proxy mode, update interval, WAF, and Telegram
-are grouped under the optional "Other options" prompt. Enabling Telegram also
-asks for an optional instance name, used to tell apart notifications from
-several instances sharing one bot. IPv4 is enabled by default and IPv6 is
+domain, and IPv4/IPv6 switches. Proxy mode, update interval, WAF, and
+notifications are grouped under the optional "Other options" prompt.
+Notifications can be enabled for Telegram, Bark, or both. Enabling either one
+also asks for an optional instance name, used to tell apart notifications from
+several instances sharing one account. IPv4 is enabled by default and IPv6 is
 disabled; disabling an address family also disables its public IP lookup.
 
 Run the installer again to open its update, reconfiguration, and uninstall
@@ -133,16 +134,19 @@ separate working directory and service when managing a different zone.
 | `quiet` | boolean | `false` | Suppress informational output |
 | `name` | string/null | `null` | Instance name prefixed to the notification summary line |
 | `telegram` | object/null | `null` | Telegram Bot API credentials |
+| `bark` | object/null | `null` | Bark push credentials |
 
 At least one domain field or `waf_lists` entry is required. Durations accept
 seconds (`30s`), minutes (`5m`), hours (`2h`), or an integer number of seconds.
 For `@once`, `update_on_start` must be `true` and `delete_on_stop` must be
 `false`.
 
-### Telegram
+### Notifications
 
-Telegram is the only supported notification service. Set the bot token and
-target chat ID directly:
+Telegram and Bark are both supported. Configure either one, or both at the
+same time to receive every notification on both.
+
+Telegram uses the Bot API:
 
 ```json
 {
@@ -153,16 +157,35 @@ target chat ID directly:
 }
 ```
 
+Bark pushes to a device key:
+
+```json
+{
+  "bark": {
+    "device_key": "your-device-key",
+    "server": "https://api.day.app",
+    "group": "ipflare"
+  }
+}
+```
+
+`bark.server` defaults to `https://api.day.app`; point it at your own address
+for a self-hosted server. `group` is optional and files the push under a
+category in Bark.
+
 Notifications are sent only when the addresses actually change, for example
-`已更新 home.example.com: 1.2.3.4 -> 5.6.7.8`. The first line carries an
-instance summary; setting `name` prefixes it with the instance name.
+`已更新 home.example.com: 1.2.3.4 -> 5.6.7.8`. Telegram carries the instance
+summary as the first line, prefixed with the instance name when `name` is set.
+Bark uses separate title and body fields, so the summary becomes the title and
+is not collapsed into the body by the system.
 
 Nothing is sent when the addresses are unchanged — including a record rewritten
 only because `proxied`, `ttl`, or `record_comment` changed — nor on detection or
 update failures. Operational problems are written to the log only; inspect them
 with journalctl or the service log. `--dry-run` prints to the console only.
 
-The token is stored in `config.json`, so keep the file at mode `0600`.
+Tokens and device keys are stored in `config.json`, so keep the file at mode
+`0600`.
 
 ### IP providers
 

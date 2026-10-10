@@ -1,6 +1,6 @@
 use crate::cloudflare::{Auth, Ttl, WAFList};
 use crate::domain;
-use crate::notifier::{Notifier, TelegramNotifier};
+use crate::notifier::{BarkNotifier, Notifier, TelegramNotifier};
 use crate::pp::PP;
 use crate::provider::{IpType, ProviderType};
 use serde::Deserialize;
@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 const CONFIG_FILE: &str = "config.json";
+const DEFAULT_BARK_SERVER: &str = "https://api.day.app";
 
 /// Runtime configuration after parsing and validating `config.json`.
 pub struct AppConfig {
@@ -34,6 +35,7 @@ pub struct AppConfig {
     pub quiet: bool,
     pub name: Option<String>,
     pub telegram: Option<TelegramConfig>,
+    pub bark: Option<BarkConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -41,6 +43,18 @@ pub struct AppConfig {
 pub struct TelegramConfig {
     pub bot_token: String,
     pub chat_id: String,
+}
+
+/// Bark push credentials. `server` is filled in during parsing, so the runtime
+/// configuration always holds a complete target.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BarkConfig {
+    pub device_key: String,
+    #[serde(default = "default_bark_server")]
+    pub server: String,
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +129,8 @@ struct FileConfig {
     name: Option<String>,
     #[serde(default)]
     telegram: Option<TelegramConfig>,
+    #[serde(default)]
+    bark: Option<BarkConfig>,
 }
 
 fn default_true() -> bool {
@@ -244,6 +260,41 @@ fn parse_telegram(config: Option<TelegramConfig>) -> Result<Option<TelegramConfi
         .transpose()
 }
 
+fn default_bark_server() -> String {
+    DEFAULT_BARK_SERVER.to_string()
+}
+
+fn parse_bark(config: Option<BarkConfig>) -> Result<Option<BarkConfig>, String> {
+    config
+        .map(|config| {
+            let device_key = config.device_key.trim().to_string();
+            if device_key.is_empty() {
+                return Err("bark.device_key must not be empty".to_string());
+            }
+
+            // An omitted or blank server means the public Bark server; only a
+            // self-hosted instance has to set it.
+            let server = config.server.trim();
+            let server = if server.is_empty() {
+                default_bark_server()
+            } else {
+                let parsed = reqwest::Url::parse(server)
+                    .map_err(|error| format!("Invalid bark.server URL '{server}': {error}"))?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(format!("bark.server must use http or https: {server}"));
+                }
+                server.to_string()
+            };
+
+            Ok(BarkConfig {
+                device_key,
+                server,
+                group: non_empty(config.group),
+            })
+        })
+        .transpose()
+}
+
 fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, String> {
     let file: FileConfig = serde_json::from_str(content)
         .map_err(|error| format!("Error parsing {CONFIG_FILE}: {error}"))?;
@@ -360,6 +411,7 @@ fn parse_config_content(content: &str, dry_run: bool) -> Result<AppConfig, Strin
         quiet: file.quiet,
         name: non_empty(file.name),
         telegram: parse_telegram(file.telegram)?,
+        bark: parse_bark(file.bark)?,
     })
 }
 
@@ -369,21 +421,38 @@ pub fn load_config(dry_run: bool) -> Result<AppConfig, String> {
     parse_config_content(&content, dry_run)
 }
 
+/// Build the notifier from the configured channels. Every channel is optional
+/// and independent: one failing to set up must not disable the others, so
+/// failures are reported and the remaining channels still run. With nothing
+/// configured the returned notifier simply never sends.
 pub fn setup_notifier(config: &AppConfig, ppfmt: &PP) -> Notifier {
-    let Some(telegram) = &config.telegram else {
-        return Notifier::disabled();
-    };
+    let mut notifier = Notifier::new(config.name.clone());
 
-    match TelegramNotifier::new(&telegram.bot_token, &telegram.chat_id) {
-        Ok(notifier) => {
-            ppfmt.infof("Notifications: Telegram");
-            Notifier::telegram(notifier, config.name.clone())
-        }
-        Err(error) => {
-            ppfmt.warningf(&format!("Failed to setup Telegram notifications: {error}"));
-            Notifier::disabled()
+    if let Some(telegram) = &config.telegram {
+        match TelegramNotifier::new(&telegram.bot_token, &telegram.chat_id) {
+            Ok(client) => {
+                notifier = notifier.with_telegram(client);
+                ppfmt.infof("Notifications: Telegram");
+            }
+            Err(error) => {
+                ppfmt.warningf(&format!("Failed to setup Telegram notifications: {error}"));
+            }
         }
     }
+
+    if let Some(bark) = &config.bark {
+        match BarkNotifier::new(&bark.device_key, &bark.server, bark.group.clone()) {
+            Ok(client) => {
+                notifier = notifier.with_bark(client);
+                ppfmt.infof("Notifications: Bark");
+            }
+            Err(error) => {
+                ppfmt.warningf(&format!("Failed to setup Bark notifications: {error}"));
+            }
+        }
+    }
+
+    notifier
 }
 
 pub fn print_config_summary(config: &AppConfig, ppfmt: &PP) {
@@ -550,6 +619,93 @@ mod tests {
         let telegram = config.telegram.unwrap();
         assert_eq!(telegram.bot_token, "bot-token");
         assert_eq!(telegram.chat_id, "-100123");
+    }
+
+    #[test]
+    fn parses_bark_notification_with_defaults() {
+        let config = parse_config_content(
+            &minimal_config(r#""bark": { "device_key": "  test-key  " },"#),
+            false,
+        )
+        .unwrap();
+        let bark = config.bark.unwrap();
+        assert_eq!(bark.device_key, "test-key");
+        assert_eq!(bark.server, "https://api.day.app");
+        assert_eq!(bark.group, None);
+    }
+
+    /// A blank server is as good as an omitted one, so a half-filled
+    /// configuration still reaches the public server.
+    #[test]
+    fn blank_bark_server_falls_back_to_the_default() {
+        let config = parse_config_content(
+            &minimal_config(r#""bark": { "device_key": "test-key", "server": "  " },"#),
+            false,
+        )
+        .unwrap();
+        assert_eq!(config.bark.unwrap().server, "https://api.day.app");
+    }
+
+    #[test]
+    fn parses_self_hosted_bark_server_and_group() {
+        let config = parse_config_content(
+            &minimal_config(
+                r#""bark": {
+                       "device_key": "test-key",
+                       "server": "https://bark.example.com",
+                       "group": " ipflare "
+                   },
+                "#,
+            ),
+            false,
+        )
+        .unwrap();
+        let bark = config.bark.unwrap();
+        assert_eq!(bark.server, "https://bark.example.com");
+        assert_eq!(bark.group.as_deref(), Some("ipflare"));
+    }
+
+    /// Both channels can be enabled at the same time.
+    #[test]
+    fn parses_telegram_and_bark_together() {
+        let config = parse_config_content(
+            &minimal_config(
+                r#""telegram": { "bot_token": "bot-token", "chat_id": "1" },
+                  "bark": { "device_key": "test-key" },"#,
+            ),
+            false,
+        )
+        .unwrap();
+        assert!(config.telegram.is_some());
+        assert!(config.bark.is_some());
+    }
+
+    #[test]
+    fn rejects_empty_bark_device_key() {
+        let error =
+            parse_config_content(&minimal_config(r#""bark": { "device_key": " " },"#), false)
+                .err()
+                .unwrap();
+        assert!(error.contains("bark.device_key"));
+    }
+
+    #[test]
+    fn rejects_invalid_bark_server() {
+        let error = parse_config_content(
+            &minimal_config(r#""bark": { "device_key": "key", "server": "ftp://example.com" },"#),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("bark.server"));
+
+        let error = parse_config_content(
+            &minimal_config(r#""bark": { "device_key": "key", "server": "not-a-url" },"#),
+            false,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("Invalid bark.server"));
     }
 
     #[test]
